@@ -40,6 +40,12 @@ def download_weight(model, model_dir=None):
         model_path = os.path.join(model_dir, model)
         vae_fp16_path = os.path.join(model_dir, "ema_vae_fp16.safetensors")
         cache_dir = model_dir
+    if not os.path.exists(vae_fp16_path) and os.path.exists(folder_paths.cache_dir):
+        model_path = os.path.join(folder_paths.cache_dir, "models/SEEDVR2", model)
+        vae_fp16_path = os.path.join(folder_paths.cache_dir, "models/SEEDVR2/ema_vae_fp16.safetensors")
+        cache_dir = os.path.join(folder_paths.cache_dir, "models/SEEDVR2")
+        global base_cache_dir
+        base_cache_dir = cache_dir
    
     # Configuration HuggingFace
     repo_id = "numz/SeedVR2_comfyUI"
