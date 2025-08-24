@@ -32,6 +32,7 @@ def download_weight(model, model_dir=None):
       2. ema_vae_fp8_e4m3fn.safetensors (fallback)  
       3. ema_vae.pth (legacy fallback)
     """
+    global base_cache_dir
     if model_dir is None:
         model_path = os.path.join(base_cache_dir, model)
         vae_fp16_path = os.path.join(base_cache_dir, "ema_vae_fp16.safetensors")
@@ -44,7 +45,6 @@ def download_weight(model, model_dir=None):
         model_path = os.path.join(folder_paths.cache_dir, "models/SEEDVR2", model)
         vae_fp16_path = os.path.join(folder_paths.cache_dir, "models/SEEDVR2/ema_vae_fp16.safetensors")
         cache_dir = os.path.join(folder_paths.cache_dir, "models/SEEDVR2")
-        global base_cache_dir
         base_cache_dir = cache_dir
    
     # Configuration HuggingFace
