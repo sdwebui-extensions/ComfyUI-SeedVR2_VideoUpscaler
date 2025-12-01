@@ -13,6 +13,12 @@ import psutil
 from typing import Tuple, Dict, Any, Optional, List, Union
     
 
+def _device_str(device: Union[torch.device, str]) -> str:
+    """Normalized uppercase device string for comparison and logging. MPS variants → 'MPS'."""
+    s = str(device).upper()
+    return 'MPS' if s.startswith('MPS') else s
+
+
 def get_device_list(include_none: bool = False, include_cpu: bool = False) -> List[str]:
     """
     Get list of available compute devices for SeedVR2
@@ -591,7 +597,7 @@ def manage_tensor(
     target_dtype = dtype if dtype is not None else current_dtype
     
     # Check if movement is actually needed
-    needs_device_move = current_device != target_device
+    needs_device_move = _device_str(current_device) != _device_str(target_device)
     needs_dtype_change = dtype is not None and current_dtype != target_dtype
     
     if not needs_device_move and not needs_dtype_change:
@@ -609,8 +615,8 @@ def manage_tensor(
     
     # Log the movement
     if debug:
-        current_device_str = str(current_device).upper()
-        target_device_str = str(target_device).upper()
+        current_device_str = _device_str(current_device)
+        target_device_str = _device_str(target_device)
         
         dtype_info = ""
         if needs_dtype_change:
@@ -681,8 +687,8 @@ def manage_model_device(model: torch.nn.Module, target_device: torch.device, mod
     
     # Extract device type for comparison (both are torch.device objects)
     target_type = target_device.type
-    current_device_upper = str(current_device).upper()
-    target_device_upper = str(target_device).upper()
+    current_device_upper = _device_str(current_device)
+    target_device_upper = _device_str(target_device)
 
     # Compare normalized device types
     if current_device_upper == target_device_upper and not is_blockswap_model:
@@ -737,10 +743,10 @@ def _handle_blockswap_model_movement(runner: Any, model: torch.nn.Module,
                 actual_source_device = param.device
                 break
         
-        source_device_desc = str(actual_source_device).upper() if actual_source_device else str(target_device).upper()
+        source_device_desc = _device_str(actual_source_device) if actual_source_device else _device_str(target_device)
         
         if debug:
-            debug.log(f"Moving {model_name} from {source_device_desc} to {str(target_device).upper()} ({reason or 'model caching'})", category="general")
+            debug.log(f"Moving {model_name} from {source_device_desc} to {_device_str(target_device)} ({reason or 'model caching'})", category="general")
         
         # Enable bypass to allow movement
         set_blockswap_bypass(runner=runner, bypass=True, debug=debug)
@@ -755,7 +761,7 @@ def _handle_blockswap_model_movement(runner: Any, model: torch.nn.Module,
         model.zero_grad(set_to_none=True)
         
         if debug:
-            debug.end_timer(timer_name, f"BlockSwap model offloaded to {str(target_device).upper()}")
+            debug.end_timer(timer_name, f"BlockSwap model offloaded to {_device_str(target_device)}")
         
         return True
         
@@ -775,10 +781,10 @@ def _handle_blockswap_model_movement(runner: Any, model: torch.nn.Module,
                 actual_current_device = param.device
                 break
         
-        current_device_desc = str(actual_current_device).upper() if actual_current_device else "OFFLOAD"
+        current_device_desc = _device_str(actual_current_device) if actual_current_device else "OFFLOAD"
         
         if debug:
-            debug.log(f"Moving {model_name} from {current_device_desc} to {str(target_device).upper()} ({reason or 'inference requirement'})", category="general")
+            debug.log(f"Moving {model_name} from {current_device_desc} to {_device_str(target_device)} ({reason or 'inference requirement'})", category="general")
         
         timer_name = f"{model_name.lower()}_to_gpu"
         if debug:
@@ -818,7 +824,7 @@ def _handle_blockswap_model_movement(runner: Any, model: torch.nn.Module,
                     blocks_on_gpu = model._block_swap_config.get('total_blocks', 32) - model._block_swap_config.get('blocks_swapped', 16)
                     total_blocks = model._block_swap_config.get('total_blocks', 32)
                     main_device = model._block_swap_config.get('main_device', 'GPU')
-                    debug.log(f"BlockSwap blocks restored to configured devices ({blocks_on_gpu}/{total_blocks} blocks on {str(main_device).upper()})", category="success")
+                    debug.log(f"BlockSwap blocks restored to configured devices ({blocks_on_gpu}/{total_blocks} blocks on {_device_str(main_device)})", category="success")
                 else:
                     debug.log("BlockSwap blocks restored to configured devices", category="success")
 
@@ -865,8 +871,8 @@ def _standard_model_movement(model: torch.nn.Module, current_device: torch.devic
     
     # Log the movement with full device strings
     if debug:
-        current_device_str = str(current_device).upper()
-        target_device_str = str(target_device).upper()
+        current_device_str = _device_str(current_device)
+        target_device_str = _device_str(target_device)
         debug.log(f"Moving {model_name} from {current_device_str} to {target_device_str} ({reason})", category="general")
 
     # Start timer based on direction
@@ -891,7 +897,7 @@ def _standard_model_movement(model: torch.nn.Module, current_device: torch.devic
     
     # End timer
     if debug:
-        debug.end_timer(timer_name, f"{model_name} moved to {str(target_device).upper()}")
+        debug.end_timer(timer_name, f"{model_name} moved to {_device_str(target_device)}")
     
     return True
 
