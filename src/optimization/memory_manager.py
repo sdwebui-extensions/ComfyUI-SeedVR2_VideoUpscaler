@@ -112,6 +112,22 @@ else:
     print(f"⚠️ Memory check failed: {vram_info['error']} - No available backend!")
 
 
+def _enforce_vram_limit() -> None:
+    """
+    Enforce VRAM limit to physical capacity to prevent silent swap to system RAM.
+    Called once at module load. No-op on MPS or unsupported platforms.
+    """
+    if not torch.cuda.is_available():
+        return
+    try:
+        for i in range(torch.cuda.device_count()):
+            torch.cuda.set_per_process_memory_fraction(1.0, i)
+    except Exception:
+        pass
+
+_enforce_vram_limit()
+
+
 def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug'] = None) -> Tuple[float, float, float]:
     """
     Get current VRAM usage metrics for monitoring.
