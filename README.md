@@ -36,6 +36,13 @@ We're actively working on improvements and new features. To stay informed:
 
 ## 🚀 Updates
 
+**2025.12.05 - Version 2.5.16**
+
+- **🔧 Fix: Older GPU compatibility (GTX 970, etc.)** - Automatic fallback for GPUs without bfloat16 support
+- **🐛 Fix: Quality regression** - Reverted bfloat16 detection that was causing artifact issues
+- **📋 Debug: Environment info display** - Shows system info in debug mode to help with issue reporting
+- **📚 Docs: Simplified contribution workflow** - Streamlined to main branch only
+
 **2025.12.03 - Version 2.5.15**
 
 - **🍎 Fix: MPS compatibility** - Disable antialias for MPS tensors and fix bfloat16 arange issues

@@ -65,7 +65,7 @@ def _safe_scaled_dot_product_attention(query, key, value, *args, **kwargs):
         if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e) and original_dtype == torch.bfloat16:
             _BFLOAT16_SDPA_WORKS = False
             print("⚠️ [SeedVR2] GPU does not support bfloat16 SDPA, using float16 fallback. "
-                  "Expect outputs with tiling artifacts and black frames.")
+                  "Tiling artifacts or black frames may occur.")
             out = _ORIGINAL_SDPA(query.half(), key.half(), value.half(), *args, **kwargs)
             return out.to(original_dtype)
         raise
