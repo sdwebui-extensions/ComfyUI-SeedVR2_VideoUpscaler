@@ -948,7 +948,7 @@ For detailed contribution guidelines, see [CONTRIBUTING.md](CONTRIBUTING.md).
 2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
 3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request to **main** branch for stable features or **nightly** branch for experimental features
+5. Open a Pull Request to the **main** branch
 
 **Get Help:**
 - YouTube: [AInVFX Channel](https://www.youtube.com/@AInVFX)
