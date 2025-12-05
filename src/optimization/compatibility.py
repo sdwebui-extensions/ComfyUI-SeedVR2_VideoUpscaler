@@ -5,6 +5,37 @@ Contains FP8/FP16 compatibility layers and wrappers for different model architec
 Extracted from: seedvr2.py (lines 1045-1630)
 """
 
+# Triton compatibility shim for bitsandbytes 0.45+ with triton 3.0+
+# Must be called before any diffusers import
+import sys
+
+def ensure_triton_compat():
+    """Create minimal triton.ops stubs only if missing, to allow bitsandbytes import."""
+    if 'triton.ops.matmul_perf_model' in sys.modules:
+        return
+    
+    try:
+        from triton.ops.matmul_perf_model import early_config_prune  # noqa: F401
+        return
+    except (ImportError, ModuleNotFoundError, AttributeError):
+        pass
+    
+    import types
+    
+    if 'triton.ops' not in sys.modules:
+        sys.modules['triton.ops'] = types.ModuleType('triton.ops')
+    
+    matmul_perf = types.ModuleType('triton.ops.matmul_perf_model')
+    matmul_perf.early_config_prune = lambda configs, *a, **kw: configs
+    matmul_perf.estimate_matmul_time = lambda *a, **kw: 0.0
+    
+    sys.modules['triton.ops'].matmul_perf_model = matmul_perf
+    sys.modules['triton.ops.matmul_perf_model'] = matmul_perf
+
+# Run immediately on import
+ensure_triton_compat()
+
+
 import torch
 import types
 import os
@@ -142,6 +173,41 @@ def _check_conv3d_memory_bug():
         return False
 
 NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = _check_conv3d_memory_bug()
+
+
+def get_supported_compute_dtype(debug=None) -> torch.dtype:
+    """
+    Detect the best supported compute dtype for the current hardware.
+    
+    bfloat16 requires CUDA compute capability 8.0+ (Ampere and newer).
+    Older CUDA GPUs fall back to float16 to avoid CUBLAS_STATUS_NOT_SUPPORTED errors.
+    
+    Args:
+        debug: Optional debug instance for logging warnings
+    
+    Returns:
+        torch.bfloat16 if supported, torch.float16 for older CUDA GPUs
+    """
+    try:
+        # CUDA: Check compute capability
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability()
+            # bfloat16 requires compute capability 8.0+ (Ampere: A100, RTX 30xx)
+            if major < 8:
+                if debug:
+                    gpu_name = torch.cuda.get_device_name()
+                    debug.log(
+                        f"GPU '{gpu_name}' (compute capability {major}.{minor}) does not support bfloat16. "
+                        f"Using float16 instead - 7B models are not supported and will render black, 3B models may have artifacts.",
+                        level="WARNING", category="precision", force=True
+                    )
+                return torch.float16
+        
+        # Default: bfloat16 (MPS, CPU, or CUDA 8.0+)
+        return torch.bfloat16
+        
+    except Exception:
+        return torch.bfloat16
 
 
 # Log all optimization status once globally (cross-process) using environment variable
