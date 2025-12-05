@@ -40,6 +40,40 @@ import torch
 import types
 import os
 
+
+# Automatic bfloat16 SDPA fallback for GPUs that don't support it (e.g., GTX 970)
+_BFLOAT16_SDPA_WORKS = None  # None=untested, True=works, False=needs float16 fallback
+_ORIGINAL_SDPA = torch.nn.functional.scaled_dot_product_attention
+
+def _safe_scaled_dot_product_attention(query, key, value, *args, **kwargs):
+    """SDPA wrapper with automatic bfloat16 -> float16 fallback for old GPUs."""
+    global _BFLOAT16_SDPA_WORKS
+    
+    original_dtype = query.dtype
+    
+    # Fast path: already know bfloat16 fails on this GPU
+    if original_dtype == torch.bfloat16 and _BFLOAT16_SDPA_WORKS is False:
+        out = _ORIGINAL_SDPA(query.half(), key.half(), value.half(), *args, **kwargs)
+        return out.to(original_dtype)
+    
+    try:
+        out = _ORIGINAL_SDPA(query, key, value, *args, **kwargs)
+        if _BFLOAT16_SDPA_WORKS is None and original_dtype == torch.bfloat16:
+            _BFLOAT16_SDPA_WORKS = True
+        return out
+    except RuntimeError as e:
+        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e) and original_dtype == torch.bfloat16:
+            _BFLOAT16_SDPA_WORKS = False
+            print("⚠️ [SeedVR2] GPU does not support bfloat16 SDPA, using float16 fallback. "
+                  "Tiling artifacts or black frames may occur.")
+            out = _ORIGINAL_SDPA(query.half(), key.half(), value.half(), *args, **kwargs)
+            return out.to(original_dtype)
+        raise
+
+# Apply SDPA patch at module load
+torch.nn.functional.scaled_dot_product_attention = _safe_scaled_dot_product_attention
+
+
 # Flash Attention & Triton Compatibility Layer
 # 1. Flash Attention - speedup for attention operations
 try:
@@ -173,41 +207,6 @@ def _check_conv3d_memory_bug():
         return False
 
 NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = _check_conv3d_memory_bug()
-
-
-def get_supported_compute_dtype(debug=None) -> torch.dtype:
-    """
-    Detect the best supported compute dtype for the current hardware.
-    
-    bfloat16 requires CUDA compute capability 8.0+ (Ampere and newer).
-    Older CUDA GPUs fall back to float16 to avoid CUBLAS_STATUS_NOT_SUPPORTED errors.
-    
-    Args:
-        debug: Optional debug instance for logging warnings
-    
-    Returns:
-        torch.bfloat16 if supported, torch.float16 for older CUDA GPUs
-    """
-    try:
-        # CUDA: Check compute capability
-        if torch.cuda.is_available():
-            major, minor = torch.cuda.get_device_capability()
-            # bfloat16 requires compute capability 8.0+ (Ampere: A100, RTX 30xx)
-            if major < 8:
-                if debug:
-                    gpu_name = torch.cuda.get_device_name()
-                    debug.log(
-                        f"GPU '{gpu_name}' (compute capability {major}.{minor}) does not support bfloat16. "
-                        f"Using float16 instead - 7B models are not supported and will render black, 3B models may have artifacts.",
-                        level="WARNING", category="precision", force=True
-                    )
-                return torch.float16
-        
-        # Default: bfloat16 (MPS, CPU, or CUDA 8.0+)
-        return torch.bfloat16
-        
-    except Exception:
-        return torch.bfloat16
 
 
 # Log all optimization status once globally (cross-process) using environment variable
