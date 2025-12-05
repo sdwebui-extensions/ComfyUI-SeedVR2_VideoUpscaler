@@ -40,6 +40,40 @@ import torch
 import types
 import os
 
+
+# Automatic bfloat16 SDPA fallback for GPUs that don't support it (e.g., GTX 970)
+_BFLOAT16_SDPA_WORKS = None  # None=untested, True=works, False=needs float16 fallback
+_ORIGINAL_SDPA = torch.nn.functional.scaled_dot_product_attention
+
+def _safe_scaled_dot_product_attention(query, key, value, *args, **kwargs):
+    """SDPA wrapper with automatic bfloat16 -> float16 fallback for old GPUs."""
+    global _BFLOAT16_SDPA_WORKS
+    
+    original_dtype = query.dtype
+    
+    # Fast path: already know bfloat16 fails on this GPU
+    if original_dtype == torch.bfloat16 and _BFLOAT16_SDPA_WORKS is False:
+        out = _ORIGINAL_SDPA(query.half(), key.half(), value.half(), *args, **kwargs)
+        return out.to(original_dtype)
+    
+    try:
+        out = _ORIGINAL_SDPA(query, key, value, *args, **kwargs)
+        if _BFLOAT16_SDPA_WORKS is None and original_dtype == torch.bfloat16:
+            _BFLOAT16_SDPA_WORKS = True
+        return out
+    except RuntimeError as e:
+        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e) and original_dtype == torch.bfloat16:
+            _BFLOAT16_SDPA_WORKS = False
+            print("⚠️ [SeedVR2] GPU does not support bfloat16 SDPA, using float16 fallback. "
+                  "Expect outputs with tiling artifacts and black frames.")
+            out = _ORIGINAL_SDPA(query.half(), key.half(), value.half(), *args, **kwargs)
+            return out.to(original_dtype)
+        raise
+
+# Apply SDPA patch at module load
+torch.nn.functional.scaled_dot_product_attention = _safe_scaled_dot_product_attention
+
+
 # Flash Attention & Triton Compatibility Layer
 # 1. Flash Attention - speedup for attention operations
 try:
