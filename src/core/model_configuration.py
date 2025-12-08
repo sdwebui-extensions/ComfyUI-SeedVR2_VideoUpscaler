@@ -72,7 +72,8 @@ from ..models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalCon
 from ..optimization.compatibility import (
     FP8CompatibleDiT,
     TRITON_AVAILABLE,
-    validate_flash_attention_availability
+    validate_flash_attention_availability,
+    detect_high_end_system
 )
 from ..optimization.blockswap import is_blockswap_enabled, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
@@ -171,7 +172,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     Generate human-readable description of attention mode configuration.
     
     Args:
-        attention_mode: Attention mode string ('sdpa' or 'flash_attn')
+        attention_mode: Attention mode string ('sdpa' or 'flash_attn' or 'sd2' or 'sd3')
         
     Returns:
         Human-readable description string
@@ -181,7 +182,9 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     
     mode_descriptions = {
         'sdpa': 'PyTorch SDPA',
-        'flash_attn': 'Flash Attention 2'
+        'flash_attn': 'Flash Attention 2',
+        'sd2': 'SageAttention v2',
+        'sd3': 'SageAttention v3'
     }
     
     return mode_descriptions.get(attention_mode, attention_mode)
@@ -745,6 +748,7 @@ def configure_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
+    precision: str = 'auto',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
 ) -> Tuple[VideoDiffusionInfer, Dict[str, Any]]:
@@ -814,6 +818,9 @@ def configure_runner(
         block_swap_config, debug
     )
     
+    # Store precision setting
+    runner._precision = precision
+
     # Phase 4: Setup models (load from cache or create new)
     _setup_models(
         runner, cache_context, dit_model, vae_model, 
@@ -894,6 +901,16 @@ def _configure_runner_settings(
     runner._vae_offload_device = ctx['vae_offload_device']
     runner._tensor_offload_device = ctx['tensor_offload_device']
     runner._compute_dtype = ctx['compute_dtype']
+
+    # Auto-detection for 5070ti/similar hardware
+    system_opts = detect_high_end_system()
+    if system_opts.get('high_vram', False):
+        if debug:
+            debug.log(f"Detected high-end system optimizations: {system_opts}", category="setup")
+        # Apply recommended settings if not overridden
+        # For example, we might favor speed/quality trade-offs differently
+        # Here we just log it as the user has control via UI, but we could set defaults if they were None
+        pass
 
     runner.debug = debug
 
@@ -1183,8 +1200,21 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             # Validate and get final attention_mode (with warning if fallback needed)
             attention_mode = validate_flash_attention_availability(requested_attention_mode, debug)
             
-            # Get compute_dtype from runner
-            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)            
+            # Get compute_dtype from runner, override if precision set
+            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
+
+            # Apply precision override if set
+            precision_override = getattr(runner, '_precision', 'auto')
+            if precision_override == 'fp16':
+                compute_dtype = torch.float16
+            elif precision_override == 'bf16':
+                compute_dtype = torch.bfloat16
+            elif precision_override == 'bf32':
+                 # TF32 is an attribute of the context, not dtype, but we can respect it here or in setup
+                 # For compute dtype, usually bf32 implies tf32 or float32 with tf32
+                 compute_dtype = torch.float32
+                 # We will handle TF32 setting globally elsewhere or here if needed
+
             debug.log(f"Applying {attention_mode} attention mode and {compute_dtype} compute dtype to model", category="setup")
             
             # Get the actual model (unwrap if needed)

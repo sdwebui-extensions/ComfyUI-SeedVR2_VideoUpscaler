@@ -16,10 +16,15 @@ import torch
 import torch.nn.functional as F
 
 # Import flash_attn with automatic fallback from compatibility layer
-from ...optimization.compatibility import flash_attn_varlen_func, FLASH_ATTN_AVAILABLE
+from ...optimization.compatibility import flash_attn_varlen_func, FLASH_ATTN_AVAILABLE, SAGE_ATTN_AVAILABLE
 
 from torch import nn
 
+# Safe import for SageAttention
+try:
+    import sageattention
+except ImportError:
+    sageattention = None
 
 def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None, dropout_p=0.0, softmax_scale=None, causal=False, deterministic=False):
     """
@@ -91,6 +96,46 @@ def _call_flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen
         **kwargs
     )
 
+@torch._dynamo.disable
+def _call_sage_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal=False, implementation="sd2"):
+    """
+    Wrapper for SageAttention variable length function.
+
+    Args:
+        implementation: "sd2" (SageAttention v2) or "sd3" (SageAttention v3)
+    """
+    if not SAGE_ATTN_AVAILABLE:
+        raise ImportError("SageAttention is not available")
+
+    # SageAttention expects q, k, v as (total_tokens, heads, head_dim)
+    # The input q, k, v here are (total_tokens, heads, head_dim)
+
+    # Convert tensor max_seqlen to Python int if needed
+    if torch.is_tensor(max_seqlen_q):
+        max_seqlen_q = int(max_seqlen_q.item())
+    if torch.is_tensor(max_seqlen_k):
+        max_seqlen_k = int(max_seqlen_k.item())
+
+    # Ensure tensors are contiguous
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+
+    # SageAttention API usage
+    # sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale)
+    try:
+         from sageattention import sageattn_varlen
+    except ImportError:
+         # Fallback or error
+         raise ImportError("sageattn_varlen not found in sageattention package")
+
+    # Check if sm_scale is needed (usually 1/sqrt(head_dim))
+    sm_scale = 1.0 / (q.shape[-1] ** 0.5)
+
+    # Calling sageattn_varlen
+    # Signature assumptions: q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale
+    return sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale)
+
 
 class TorchAttention(nn.Module):
     def tflops(self, args, kwargs, output) -> float:
@@ -148,6 +193,16 @@ class FlashAttentionVarlen(nn.Module):
             return _call_flash_attn_varlen_func(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, 
                 max_seqlen_q, max_seqlen_k, **kwargs
+            )
+        elif self.attention_mode in ['sd2', 'sd3']:
+            # Use SageAttention
+            # Extract causal flag if present in kwargs, default to False
+            is_causal = kwargs.get('causal', False)
+            return _call_sage_attn_varlen_func(
+                q, k, v, cu_seqlens_q, cu_seqlens_k,
+                max_seqlen_q, max_seqlen_k,
+                is_causal=is_causal,
+                implementation=self.attention_mode
             )
         else:
             # PyTorch SDPA

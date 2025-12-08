@@ -50,16 +50,24 @@ except ImportError:
     flash_attn_varlen_func = None
     FLASH_ATTN_AVAILABLE = False
 
+# 1.1 SageAttention - speedup for attention operations
+try:
+    import sageattention
+    SAGE_ATTN_AVAILABLE = True
+except ImportError:
+    SAGE_ATTN_AVAILABLE = False
+
+
 def validate_flash_attention_availability(requested_mode: str, debug=None) -> str:
     """
-    Validate Flash Attention availability and warn if fallback needed.
+    Validate attention mode availability and warn if fallback needed.
     
     Args:
-        requested_mode: Either 'flash_attn' or 'sdpa'
+        requested_mode: 'flash_attn', 'sdpa', 'sd2', or 'sd3'
         debug: Optional debug instance for logging
         
     Returns:
-        Validated mode ('flash_attn' or 'sdpa')
+        Validated mode
     """
     if requested_mode == 'flash_attn' and not FLASH_ATTN_AVAILABLE:
         error_msg = (
@@ -77,6 +85,21 @@ def validate_flash_attention_availability(requested_mode: str, debug=None) -> st
         if debug:
             debug.log(error_msg, level="WARNING", category="setup", force=True)
         
+        return 'sdpa'
+
+    if requested_mode in ['sd2', 'sd3'] and not SAGE_ATTN_AVAILABLE:
+        error_msg = (
+            f"Cannot use '{requested_mode}' attention mode: SageAttention is not installed.\n"
+            f"\n"
+            f"SageAttention provides speedup on some hardware.\n"
+            f"Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            f"\n"
+            f"To fix this issue:\n"
+            f"  1. Install SageAttention: pip install sageattention\n"
+            f"  2. OR change attention_mode to 'sdpa' (default, always available)\n"
+        )
+        if debug:
+             debug.log(error_msg, level="WARNING", category="setup", force=True)
         return 'sdpa'
     
     return requested_mode
@@ -219,6 +242,33 @@ def _probe_bfloat16_support() -> bool:
 
 BFLOAT16_SUPPORTED = _probe_bfloat16_support()
 COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
+
+def detect_high_end_system() -> Dict[str, Any]:
+    """
+    Detect high-end systems (16GB+ VRAM, etc.) and return optimized defaults.
+
+    Returns:
+        Dict with recommended settings or empty if no specific optimizations found.
+    """
+    optimizations = {}
+    try:
+        # Basic VRAM check
+        if torch.cuda.is_available():
+            device = torch.device("cuda:0")
+            props = torch.cuda.get_device_properties(device)
+            total_vram_gb = props.total_memory / (1024**3)
+
+            # High-end GPU check (e.g., 5070ti/4080/4090/etc with >15GB VRAM)
+            if total_vram_gb >= 15.5:
+                optimizations['high_vram'] = True
+                optimizations['recommended_dtype'] = 'bf16' if BFLOAT16_SUPPORTED else 'fp16'
+                # For 16GB cards, BlockSwap might still be useful for 7B models but maybe less aggressive
+                optimizations['block_swap_recommendation'] = 'moderate'
+
+    except Exception:
+        pass
+
+    return optimizations
 
 
 def call_rope_with_stability(method, *args, **kwargs):

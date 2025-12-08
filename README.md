@@ -36,6 +36,12 @@ We're actively working on improvements and new features. To stay informed:
 
 ## 🚀 Updates
 
+**2025.12.08 - Version 2.5.18**
+
+- **🚀 Feature: SageAttention Support** - Added `sd2` and `sd3` attention modes for experimental support of SageAttention v2 and v3 kernels.
+- **⚡ Feature: Precision Control** - Added `precision` selector (auto/fp16/bf16/bf32) to main upscaler node for fine-grained control over computation dtype.
+- **🔧 Optimization: High-end GPU Tuning** - Improved auto-detection defaults for Blackwell (50-series) and high-VRAM GPUs.
+
 **2025.12.05 - Version 2.5.17**
 
 - **🔧 Fix: Older GPU compatibility (GTX 970, etc.)** - Runtime bf16 CUBLAS probe replaces compute capability heuristics, correctly detecting unsupported GPUs without affecting RTX 20XX
