@@ -851,8 +851,8 @@ def _worker_process(
         runner_cache=None  # No caching in multiprocessing mode
     )
     
-    # Send back result as numpy array
-    return_queue.put((proc_idx, result_tensor.numpy()))
+    # Share tensor memory for efficient cross-process transfer (avoids pickling large arrays)
+    return_queue.put((proc_idx, result_tensor.share_memory_()))
 
 
 def _single_gpu_direct_processing(
@@ -951,11 +951,12 @@ def _gpu_processing(
         workers.append(p)
 
     # Collect results before joining to prevent deadlock
+    # Tensors arrive via shared memory - convert to numpy for downstream processing
     results_np = [None] * num_devices
     collected = 0
     while collected < num_devices:
-        proc_idx, res_np = return_queue.get()
-        results_np[proc_idx] = res_np
+        proc_idx, result_tensor = return_queue.get()
+        results_np[proc_idx] = result_tensor.numpy()
         collected += 1
     
     # Now safe to join
