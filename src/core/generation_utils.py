@@ -365,6 +365,10 @@ def setup_generation_context(
         interrupt_fn = None
         comfyui_available = False
     
+    # Determine compute dtype (allow override in context setup if needed, but standard flow uses COMPUTE_DTYPE)
+    # The precision selection in UI overrides this later in model_configuration.
+    compute_dtype = COMPUTE_DTYPE
+
     # Create generation context
     ctx = {
         'dit_device': dit_device,
@@ -372,7 +376,7 @@ def setup_generation_context(
         'dit_offload_device': dit_offload_device,
         'vae_offload_device': vae_offload_device,
         'tensor_offload_device': tensor_offload_device,
-        'compute_dtype': COMPUTE_DTYPE,
+        'compute_dtype': compute_dtype,
         'interrupt_fn': interrupt_fn,
         'video_transform': None,
         'text_embeds': None,
