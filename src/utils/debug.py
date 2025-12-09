@@ -10,7 +10,14 @@ import torch
 import gc
 from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
-from ..optimization.memory_manager import get_vram_usage, get_basic_vram_info, get_ram_usage, reset_vram_peak
+from ..optimization.memory_manager import (
+    get_vram_usage, 
+    get_basic_vram_info, 
+    get_ram_usage, 
+    reset_vram_peak, 
+    is_vram_overflow_allowed,
+    was_vram_limit_change_attempted
+)
 from ..utils.constants import __version__
 
 
@@ -131,6 +138,7 @@ class Debug:
         
         # ASCII art logo
         self.log("", category="none", force=True)
+        self.log("", category="none", force=True)
         self.log("███████╗███████╗███████╗██████╗ ██╗   ██╗██████╗     ██████╗       ███████╗", category="none", force=True, indent_level=1)
         self.log("██╔════╝██╔════╝██╔════╝██╔══██╗██║   ██║██╔══██╗    ╚════██╗      ██╔════╝", category="none", force=True, indent_level=1)
         self.log("███████╗█████╗  █████╗  ██║  ██║██║   ██║██████╔╝     █████╔╝      ███████╗", category="none", force=True, indent_level=1)
@@ -155,6 +163,11 @@ class Debug:
         # Environment info - only in debug mode
         if self.enabled:
             self._print_environment_info(cli)
+        
+        # VRAM overflow status - warnings always shown
+        vram_warning_shown = self._print_vram_overflow_status()
+
+        self.log("", category="none", force=vram_warning_shown)
 
     def _print_environment_info(self, cli: bool = False) -> None:
         """Print concise environment info for bug reports - zero cost when debug disabled"""
@@ -216,7 +229,32 @@ class Debug:
         self.log(f"Python: {py_ver} | PyTorch: {torch_ver} | Flash Attn: {flash_str} | Triton: {triton_str}", category="info")
         cuda_line = f"CUDA: {cuda_ver} | cuDNN: {cudnn_ver}"
         self.log(f"{cuda_line} | ComfyUI: {comfy_str}" if comfy_str else cuda_line, category="info")
-        self.log("", category="none")
+
+    def _print_vram_overflow_status(self) -> bool:
+        """Print VRAM overflow status - warnings always shown, info only in debug mode.
+        
+        Returns:
+            True if a forced warning was printed, False otherwise.
+        """
+        is_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+        force = False
+        
+        if was_vram_limit_change_attempted():
+            self.log("allow_vram_overflow setting changed - restart ComfyUI to apply", level="WARNING", category="memory", force=True)
+            force = True
+        elif is_vram_overflow_allowed():
+            if is_mps:
+                self.log("allow_vram_overflow: enabled (no effect on Apple Silicon unified memory)", category="info")
+            else:
+                self.log("allow_vram_overflow: enabled - may cause severe slowdown if physical VRAM exceeded", level="WARNING", category="memory", force=True)
+                force = True
+        else:
+            if is_mps:
+                self.log("allow_vram_overflow: disabled (no effect on Apple Silicon unified memory)", category="info")
+            else:
+                self.log("allow_vram_overflow: disabled (recommended for best performance)", category="success")
+        
+        return force
 
     def print_footer(self) -> None:
         """Print the footer with links - always displayed"""
@@ -387,10 +425,11 @@ class Debug:
         if show_diff and self.memory_checkpoints:
             self._log_memory_diff(current_metrics=memory_info, force=force)
 
-        # Warn if swap detected (peak > physical VRAM)
+        # Warn if swap detected (peak > physical VRAM), unless user explicitly allowed overflow
         if memory_info['vram_total'] > 0 and memory_info['vram_peak_since_last'] > memory_info['vram_total']:
-            self.log("VRAM swap detected - severe slowdown expected. Consider optimizing (e.g., reduce resolution, batch_size, enable BlockSwap, VAE tiling...).", 
-                     level="WARNING", category="memory", force=True)
+            if not is_vram_overflow_allowed():
+                self.log("VRAM swap detected - severe slowdown expected. Consider optimizing (e.g., reduce resolution, batch_size, enable BlockSwap, VAE tiling...).", 
+                         level="WARNING", category="memory", force=True)
 
         # Log detailed analysis if requested
         if detailed_tensors and tensor_stats.get('details'):

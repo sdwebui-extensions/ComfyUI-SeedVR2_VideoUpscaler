@@ -112,20 +112,60 @@ else:
     print(f"⚠️ Memory check failed: {vram_info['error']} - No available backend!")
 
 
-def _enforce_vram_limit() -> None:
+# VRAM overflow configuration state
+_vram_overflow_allowed: bool = True
+_vram_limit_configured: bool = False
+_vram_limit_change_attempted: bool = False
+
+
+def configure_vram_limit(allow_overflow: bool = False) -> bool:
     """
-    Enforce VRAM limit to physical capacity to prevent silent swap to system RAM.
-    Called once at module load. No-op on MPS or unsupported platforms.
+    Configure VRAM limit enforcement. Call early before heavy CUDA usage.
+    
+    Args:
+        allow_overflow: If True, allow VRAM overflow to system RAM (prevents OOM but may be slow).
+                       If False (default), enforce strict physical VRAM limit.
+    
+    Returns:
+        True if configuration applied successfully, False otherwise
+    
+    Note:
+        Can only be configured once per session. Restart required to change.
     """
+    global _vram_overflow_allowed, _vram_limit_configured, _vram_limit_change_attempted
+    
+    # Already configured this session - track if user tried to change
+    if _vram_limit_configured:
+        if _vram_overflow_allowed != allow_overflow:
+            _vram_limit_change_attempted = True
+        return _vram_overflow_allowed == allow_overflow
+    
+    _vram_limit_configured = True
+    _vram_overflow_allowed = allow_overflow
+    
+    if allow_overflow:
+        return True
+    
     if not torch.cuda.is_available():
-        return
+        return True
+    
     try:
         for i in range(torch.cuda.device_count()):
             torch.cuda.set_per_process_memory_fraction(1.0, i)
-    except Exception:
-        pass
+        return True
+    except RuntimeError:
+        _vram_overflow_allowed = True
+        return False
 
-_enforce_vram_limit()
+
+def is_vram_overflow_allowed() -> bool:
+    """Check if VRAM overflow to system RAM is allowed."""
+    return _vram_overflow_allowed
+
+
+def was_vram_limit_change_attempted() -> bool:
+    """Check if user tried to change VRAM limit setting after initial configuration."""
+    return _vram_limit_change_attempted
 
 
 def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug'] = None) -> Tuple[float, float, float]:

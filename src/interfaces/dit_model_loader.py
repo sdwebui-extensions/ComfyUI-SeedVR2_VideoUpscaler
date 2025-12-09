@@ -7,7 +7,7 @@ from comfy_api.latest import io
 from comfy_execution.utils import get_executing_context
 from typing import Dict, Any, Tuple
 from ..utils.model_registry import get_available_dit_models, DEFAULT_DIT
-from ..optimization.memory_manager import get_device_list
+from ..optimization.memory_manager import get_device_list, configure_vram_limit
 
 
 class SeedVR2LoadDiTModel(io.ComfyNode):
@@ -112,6 +112,18 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                         "Flash Attention provides speedup through optimized CUDA kernels on compatible GPUs."
                     )
                 ),
+                io.Boolean.Input("allow_vram_overflow",
+                    default=False,
+                    optional=True,
+                    tooltip=(
+                        "Allow VRAM to overflow to system RAM when physical VRAM is exceeded.\n"
+                        "• False (default): Strict VRAM limit - OOM if exceeded (faster when within limits)\n"
+                        "• True: Allow overflow to RAM - prevents OOM but may cause severe slowdown\n"
+                        "\n"
+                        "Last resort when other memory optimizations are insufficient.\n"
+                        "Requires ComfyUI restart to change. No effect on Apple Silicon (unified memory)."
+                    )
+                ),
                 io.Custom("TORCH_COMPILE_ARGS").Input("torch_compile_args",
                     optional=True,
                     tooltip=(
@@ -131,6 +143,7 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
     def execute(cls, model: str, device: str, offload_device: str = "none",
                      cache_model: bool = False, blocks_to_swap: int = 0, 
                      swap_io_components: bool = False, attention_mode: str = "sdpa",
+                     allow_vram_overflow: bool = False,
                      torch_compile_args: Dict[str, Any] = None) -> io.NodeOutput:
         """
         Create DiT model configuration for SeedVR2 main node
@@ -143,6 +156,7 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
             blocks_to_swap: Number of transformer blocks to swap (requires offload_device != device)
             swap_io_components: Whether to offload I/O components (requires offload_device != device)
             attention_mode: Attention computation backend ('sdpa' or 'flash_attn')
+            allow_vram_overflow: Allow VRAM overflow to system RAM (prevents OOM but slower)
             torch_compile_args: Optional torch.compile configuration from settings node
             
         Returns:
@@ -167,6 +181,9 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                 "Please set offload_device to specify where the cached DiT model should be stored "
                 "(e.g., 'cpu' or another device). Set cache_model=False if you don't want to cache the model."
             )
+        
+        # Configure VRAM limit enforcement (once per session, first call wins)
+        configure_vram_limit(allow_overflow=allow_vram_overflow)
         
         config = {
             "model": model,

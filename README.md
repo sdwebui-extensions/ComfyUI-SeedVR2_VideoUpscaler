@@ -418,6 +418,13 @@ Configure the DiT (Diffusion Transformer) model for video upscaling.
   - `sdpa`: PyTorch scaled_dot_product_attention (default, stable, always available)
   - `flash_attn`: Flash Attention 2 (faster on supported hardware, requires flash-attn package)
 
+- **allow_vram_overflow**: Allow VRAM to overflow to system RAM
+  - `False` (default): Strict VRAM limit - prevents silent swap but OOMs if exceeded
+  - `True`: Allow overflow - prevents OOM but may cause severe slowdown when physical VRAM exceeded
+  - Last resort when other memory optimizations are insufficient
+  - Requires ComfyUI restart to change setting
+  - No effect on Apple Silicon (unified memory architecture)
+
 - **torch_compile_args**: Connect to SeedVR2 Torch Compile Settings node for 20-40% speedup
 
 **BlockSwap Explained:**
@@ -872,6 +879,7 @@ python inference_cli.py media_folder/ \
 - `--tile_debug`: Visualize tiles: 'false' (default), 'encode', or 'decode'
 
 **Performance Optimization:**
+- `--allow_vram_overflow`: Allow VRAM overflow to system RAM. Prevents OOM but may cause severe slowdown
 - `--attention_mode`: Attention backend: 'sdpa' (default, stable) or 'flash_attn' (faster, requires package)
 - `--compile_dit`: Enable torch.compile for DiT model (20-40% speedup, requires PyTorch 2.0+ and Triton)
 - `--compile_vae`: Enable torch.compile for VAE model (15-25% speedup, requires PyTorch 2.0+ and Triton)
