@@ -848,17 +848,16 @@ def _worker_process(
     device_id: str, 
     frames_np: np.ndarray, 
     shared_args: Dict[str, Any], 
-    return_queue: mp.Queue
+    return_queue: mp.Queue,
+    done_barrier: mp.Barrier
 ) -> None:
     """
     Worker process for multi-GPU upscaling.
     
     CUDA_VISIBLE_DEVICES is set by parent before spawn, so this worker
-    only sees its assigned GPU. Results returned via queue as numpy arrays.
+    only sees its assigned GPU. Results returned via shared memory tensors.
+    Worker waits at barrier until parent has copied the shared tensor.
     """
-    # Note: CUDA_VISIBLE_DEVICES and PYTORCH_CUDA_ALLOC_CONF are inherited
-    # from parent (set before spawn). torch is imported at module level.
-    
     # Create debug instance for this worker
     worker_debug = Debug(enabled=shared_args["debug"])
     
@@ -879,6 +878,10 @@ def _worker_process(
     
     # Share tensor memory for efficient cross-process transfer (avoids pickling large arrays)
     return_queue.put((proc_idx, result_tensor.share_memory_()))
+    
+    # Wait for parent to copy shared tensors before exiting
+    # (shared memory requires creating process to stay alive during access)
+    done_barrier.wait()
 
 
 def _single_gpu_direct_processing(
@@ -959,6 +962,8 @@ def _gpu_processing(
 
     # Use direct Queue with explicit unlimited size for large video chunks
     return_queue = mp.Queue(maxsize=0)  # 0 = unlimited (explicit)
+    # Barrier keeps workers alive until parent copies shared tensors
+    done_barrier = mp.Barrier(num_devices + 1)  # workers + parent
     workers = []
 
     # Convert args namespace to dict for serialization
@@ -971,19 +976,22 @@ def _gpu_processing(
         
         p = mp.Process(
             target=_worker_process,
-            args=(idx, device_id, chunk_tensor.cpu().numpy(), shared_args, return_queue),
+            args=(idx, device_id, chunk_tensor.cpu().numpy(), shared_args, return_queue, done_barrier),
         )
         p.start()
         workers.append(p)
 
     # Collect results before joining to prevent deadlock
-    # Tensors arrive via shared memory - convert to numpy for downstream processing
+    # Tensors arrive via shared memory - copy to numpy while workers still alive
     results_np = [None] * num_devices
     collected = 0
     while collected < num_devices:
         proc_idx, result_tensor = return_queue.get()
         results_np[proc_idx] = result_tensor.numpy()
         collected += 1
+    
+    # Release workers now that shared tensors are copied
+    done_barrier.wait()
     
     # Now safe to join
     for p in workers:
