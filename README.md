@@ -38,9 +38,9 @@ We're actively working on improvements and new features. To stay informed:
 
 **2025.12.09 - Version 2.5.18**
 
-- **🚀 CLI: Streaming mode for long videos** - New `--chunk_size` flag processes videos in memory-bounded chunks, enabling arbitrarily long videos without RAM limits. Works with model caching (`--cache_dit`/`--cache_vae`) for chunk-to-chunk reuse *(inspired by @disk02 PR contribution)*
+- **🚀 CLI: Streaming mode for long videos** - New `--chunk_size` flag processes videos in memory-bounded chunks, enabling arbitrarily long videos without RAM limits. Works with model caching (`--cache_dit`/`--cache_vae`) for chunk-to-chunk reuse *(inspired by [disk02](https://github.com/disk02) PR contribution)*
 - **⚡ CLI: Multi-GPU streaming** - Each GPU now streams its segment internally with independent model caching, improving memory efficiency and enabling `--temporal_overlap` blending at GPU boundaries
-- **🔧 CLI: Fix large video MemoryError** - Shared memory transfer replaces numpy pickling, preventing crashes on high-resolution/long video outputs *(inspired by  @FurkanGozukara PR contribution)*
+- **🔧 CLI: Fix large video MemoryError** - Shared memory transfer replaces numpy pickling, preventing crashes on high-resolution/long video outputs *(inspired by  [FurkanGozukara](https://github.com/FurkanGozukara) PR contribution)*
 
 **2025.12.05 - Version 2.5.17**
 
