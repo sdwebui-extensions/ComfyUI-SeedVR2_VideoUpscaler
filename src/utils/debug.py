@@ -125,26 +125,32 @@ class Debug:
 
     def print_header(self, cli: bool = False) -> None:
         """Print the header with banner - always displayed"""
-        # Intro logo
-        self.log("", category="none", force=True)
-        self.log(" ╔══════════════════════════════════════════════════════════╗", category="none", force=True)
-        self.log(" ║ ███████ ███████ ███████ ██████  ██    ██ ██████  ███████ ║", category="none", force=True)
-        self.log(" ║ ██      ██      ██      ██   ██ ██    ██ ██   ██      ██ ║", category="none", force=True)
-        self.log(" ║ ███████ █████   █████   ██   ██ ██    ██ ██████  █████   ║", category="none", force=True)
-        self.log(" ║      ██ ██      ██      ██   ██  ██  ██  ██   ██ ██      ║", category="none", force=True)
-        self.log(" ║ ███████ ███████ ███████ ██████    ████   ██   ██ ███████ ║", category="none", force=True)
+        # Temporarily disable timestamps for clean header display
+        original_timestamps = self.show_timestamps
+        self.show_timestamps = False
         
-        # Version number with dynamic padding to maintain visual alignment with any version length
-        version_text = f"v{__version__}"
-        prefix = " 💻 CLI mode · " if cli else " "
-        suffix = "© ByteDance Seed · NumZ · AInVFX "
-        emoji_compensation = 1 if cli else 0
-        padding_width = 59 - len(prefix) - len(version_text) - len(suffix) - 2 - emoji_compensation
-        padding = " " * max(1, padding_width)
-        self.log(f" ║{prefix}{version_text}{padding} {suffix}║", category="none", force=True)
-
-        self.log(" ╚══════════════════════════════════════════════════════════╝", category="none", force=True)
+        # ASCII art logo
         self.log("", category="none", force=True)
+        self.log("███████╗███████╗███████╗██████╗ ██╗   ██╗██████╗     ██████╗       ███████╗", category="none", force=True, indent_level=1)
+        self.log("██╔════╝██╔════╝██╔════╝██╔══██╗██║   ██║██╔══██╗    ╚════██╗      ██╔════╝", category="none", force=True, indent_level=1)
+        self.log("███████╗█████╗  █████╗  ██║  ██║██║   ██║██████╔╝     █████╔╝      ███████╗", category="none", force=True, indent_level=1)
+        self.log("╚════██║██╔══╝  ██╔══╝  ██║  ██║╚██╗ ██╔╝██╔══██╗    ██╔═══╝       ╚════██║", category="none", force=True, indent_level=1)
+        self.log("███████║███████╗███████╗██████╔╝ ╚████╔╝ ██║  ██║    ███████╗  ██╗ ███████║", category="none", force=True, indent_level=1)
+        self.log("╚══════╝╚══════╝╚══════╝╚═════╝   ╚═══╝  ╚═╝  ╚═╝    ╚══════╝  ╚═╝ ╚══════╝", category="none", force=True, indent_level=1)
+        # Version and credits - left/right aligned to logo width
+        version_text = f"v{__version__}"
+        cli_indicator = "💻 CLI · " if cli else ""
+        left_part = f"{cli_indicator}{version_text}"
+        right_part = "© ByteDance Seed · NumZ · AInVFX"
+        logo_width = 75
+        emoji_compensation = 1 if cli else 0
+        padding = logo_width - len(left_part) - len(right_part) - emoji_compensation
+        self.log(f"{left_part}{' ' * max(1, padding)}{right_part}", category="none", force=True, indent_level=1)
+        self.log("━" * logo_width, category="none", force=True, indent_level=1)
+        self.log("", category="none", force=True)
+        
+        # Restore timestamps setting
+        self.show_timestamps = original_timestamps
         
         # Environment info - only in debug mode
         if self.enabled:
