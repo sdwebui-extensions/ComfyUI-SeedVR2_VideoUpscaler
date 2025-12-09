@@ -1182,12 +1182,13 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
     """
     if is_dit:
         # DiT-specific
+        # Get compute_dtype from runner if available, fallback to bfloat16
+        compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
+
         # Apply FP8 compatibility wrapper with compute_dtype
         if not isinstance(model, FP8CompatibleDiT):
             debug.log("Applying FP8/RoPE compatibility wrapper to DiT model", category="setup")
             debug.start_timer("FP8CompatibleDiT")
-            # Get compute_dtype from runner if available, fallback to bfloat16
-            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
             model = FP8CompatibleDiT(model, debug, compute_dtype=compute_dtype, skip_conversion=False)
             debug.end_timer("FP8CompatibleDiT", "FP8/RoPE compatibility wrapper application")
         else:
