@@ -1528,18 +1528,18 @@ def main() -> None:
             
             debug.log(f"Found {len(media_files)} media files to process", category="file", force=True)
             
-            # Validate caching with multi-GPU (not supported in CLI - would need shared memory)
-            if (args.cache_dit or args.cache_vae) and len(device_list) > 1:
+            # Multi-GPU caching requires streaming (workers cache within their chunk loops)
+            if (args.cache_dit or args.cache_vae) and len(device_list) > 1 and args.chunk_size <= 0:
                 debug.log(
-                    "Model caching requires single GPU selection (you selected multiple GPUs). "
-                    "Disabling caching for this run.", 
+                    "Model caching requires streaming mode (--chunk_size > 0) for multi-GPU. "
+                    "Disabling caching for this run.",
                     level="WARNING", category="cache", force=True
                 )
                 args.cache_dit = False
                 args.cache_vae = False
             
-            # Initialize runner cache if caching enabled
-            runner_cache = {} if (args.cache_dit or args.cache_vae) else None
+            # Single-GPU: runner_cache persists across files; multi-GPU: workers cache internally
+            runner_cache = {} if (args.cache_dit or args.cache_vae) and len(device_list) == 1 else None
             
             for idx, file_path in enumerate(media_files, 1):
                 # Visual separation between files (except before first file)
@@ -1579,19 +1579,21 @@ def main() -> None:
             if format_auto_detected:
                 args.output_format = "mp4" if input_type == "video" else "png"
             
-            # Setup caching for single file (benefits streaming mode, no benefit otherwise)
+            # Caching: single-GPU streaming uses runner_cache, multi-GPU streaming workers cache internally
             runner_cache = None
-            if (args.cache_dit or args.cache_vae):
+            streaming = args.chunk_size > 0
+            
+            if args.cache_dit or args.cache_vae:
                 if len(device_list) > 1:
-                    debug.log(
-                        "Model caching requires single GPU selection (you selected multiple GPUs). "
-                        "Disabling caching for this run.",
-                        level="WARNING", category="cache", force=True
-                    )
-                    args.cache_dit = False
-                    args.cache_vae = False
-                elif args.chunk_size > 0:
-                    # Caching benefits streaming mode (reuse models between chunks)
+                    if not streaming:
+                        debug.log(
+                            "Model caching requires streaming mode (--chunk_size > 0) for multi-GPU. "
+                            "Disabling caching for this run.",
+                            level="WARNING", category="cache", force=True
+                        )
+                        args.cache_dit = False
+                        args.cache_vae = False
+                elif streaming:
                     runner_cache = {}
                 else:
                     debug.log(
