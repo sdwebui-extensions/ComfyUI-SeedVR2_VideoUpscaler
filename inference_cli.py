@@ -688,8 +688,7 @@ def _process_frames_core(
             dit_offload_device=dit_offload,
             vae_offload_device=vae_offload,
             tensor_offload_device=tensor_offload,
-            debug=debug,
-            precision=args.precision
+            debug=debug
         )
         if runner_cache is not None:
             runner_cache['ctx'] = ctx
