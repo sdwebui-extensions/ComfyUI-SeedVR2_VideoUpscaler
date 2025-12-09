@@ -1186,16 +1186,31 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
     """
     if is_dit:
         # DiT-specific
-        # Apply FP8 compatibility wrapper with compute_dtype
+        # Determine compute_dtype upfront (respect precision setting)
+        compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
+
+        # Apply precision override if set (redundant if ctx already handled it, but safe)
+        precision_override = getattr(runner, '_precision', 'auto')
+        if precision_override == 'fp16':
+            compute_dtype = torch.float16
+        elif precision_override == 'bf16':
+            compute_dtype = torch.bfloat16
+        elif precision_override == 'bf32':
+             # TF32 context
+             compute_dtype = torch.float32
+
+        # Apply FP8 compatibility wrapper with correct compute_dtype
         if not isinstance(model, FP8CompatibleDiT):
             debug.log("Applying FP8/RoPE compatibility wrapper to DiT model", category="setup")
             debug.start_timer("FP8CompatibleDiT")
-            # Get compute_dtype from runner if available, fallback to bfloat16
-            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
             model = FP8CompatibleDiT(model, debug, compute_dtype=compute_dtype, skip_conversion=False)
             debug.end_timer("FP8CompatibleDiT", "FP8/RoPE compatibility wrapper application")
         else:
             debug.log("Reusing existing FP8/RoPE compatibility wrapper", category="reuse")
+            # Update compute_dtype if wrapper exists
+            if model.compute_dtype != compute_dtype:
+                debug.log(f"Updating FP8 wrapper compute_dtype to {compute_dtype}", category="setup")
+                model.compute_dtype = compute_dtype
         
         # Apply attention mode and compute_dtype to all FlashAttentionVarlen modules
         if hasattr(runner, '_dit_attention_mode'):
@@ -1204,21 +1219,6 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             # Validate and get final attention_mode (with warning if fallback needed)
             attention_mode = validate_flash_attention_availability(requested_attention_mode, debug)
             
-            # Get compute_dtype from runner, override if precision set
-            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
-
-            # Apply precision override if set
-            precision_override = getattr(runner, '_precision', 'auto')
-            if precision_override == 'fp16':
-                compute_dtype = torch.float16
-            elif precision_override == 'bf16':
-                compute_dtype = torch.bfloat16
-            elif precision_override == 'bf32':
-                 # TF32 is an attribute of the context, not dtype, but we can respect it here or in setup
-                 # For compute dtype, usually bf32 implies tf32 or float32 with tf32
-                 compute_dtype = torch.float32
-                 # We will handle TF32 setting globally elsewhere or here if needed
-
             # Log final decision prominently
             mode_desc = _describe_attention_mode(attention_mode)
             debug.log(f"Using Attention Mode: {mode_desc}", category="info", force=True)
