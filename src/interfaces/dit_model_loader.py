@@ -100,15 +100,15 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                     )
                 ),
                 io.Combo.Input("attention_mode",
-                    options=["sdpa", "flash_attn", "sd2", "sd3"],
+                    options=["sdpa", "flash_attn", "sa2", "sa3"],
                     default="sdpa",
                     optional=True,
                     tooltip=(
                         "Attention computation backend:\n"
                         "• sdpa: PyTorch scaled_dot_product_attention (default, stable, always available)\n"
                         "• flash_attn: Flash Attention 2 (faster on supported hardware, requires flash-attn package)\n"
-                        "• sd2: SageAttention v2 (requires sageattention package)\n"
-                        "• sd3: SageAttention v3 (requires sageattention package)\n"
+                        "• sa2: SageAttention v2 (requires sageattention package)\n"
+                        "• sa3: SageAttention v3 (requires sageattention package)\n"
                         "\n"
                         "SDPA is recommended - stable and works everywhere.\n"
                         "Flash Attention and SageAttention provide speedup through optimized CUDA kernels on compatible GPUs."
