@@ -749,6 +749,7 @@ def configure_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
+    precision: str = 'auto',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
 ) -> Tuple[VideoDiffusionInfer, Dict[str, Any]]:
@@ -821,6 +822,9 @@ def configure_runner(
         block_swap_config, debug
     )
     
+    # Store precision setting
+    runner._precision = precision
+
     # Phase 4: Setup models (load from cache or create new)
     _setup_models(
         runner, cache_context, dit_model, vae_model, 
@@ -1182,10 +1186,20 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
     """
     if is_dit:
         # DiT-specific
-        # Get compute_dtype from runner if available, fallback to bfloat16
+        # Determine compute_dtype upfront (respect precision setting)
         compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
 
-        # Apply FP8 compatibility wrapper with compute_dtype
+        # Apply precision override if set (redundant if ctx already handled it, but safe)
+        precision_override = getattr(runner, '_precision', 'auto')
+        if precision_override == 'fp16':
+            compute_dtype = torch.float16
+        elif precision_override == 'bf16':
+            compute_dtype = torch.bfloat16
+        elif precision_override == 'bf32':
+             # TF32 context
+             compute_dtype = torch.float32
+
+        # Apply FP8 compatibility wrapper with correct compute_dtype
         if not isinstance(model, FP8CompatibleDiT):
             debug.log("Applying FP8/RoPE compatibility wrapper to DiT model", category="setup")
             debug.start_timer("FP8CompatibleDiT")
@@ -1193,6 +1207,10 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             debug.end_timer("FP8CompatibleDiT", "FP8/RoPE compatibility wrapper application")
         else:
             debug.log("Reusing existing FP8/RoPE compatibility wrapper", category="reuse")
+            # Update compute_dtype if wrapper exists
+            if model.compute_dtype != compute_dtype:
+                debug.log(f"Updating FP8 wrapper compute_dtype to {compute_dtype}", category="setup")
+                model.compute_dtype = compute_dtype
         
         # Apply attention mode and compute_dtype to all FlashAttentionVarlen modules
         if hasattr(runner, '_dit_attention_mode'):

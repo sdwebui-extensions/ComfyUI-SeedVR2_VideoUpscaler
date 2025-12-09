@@ -204,6 +204,18 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                         "• 'cuda:X': Offload to another GPU (good balance if available, faster than CPU)"
                     )
                 ),
+                io.Combo.Input("precision",
+                    options=["auto", "fp16", "bf16", "bf32"],
+                    default="auto",
+                    optional=True,
+                    tooltip=(
+                        "Precision for main generation process (default: auto).\n"
+                        "• auto: Automatically select based on device capabilities\n"
+                        "• fp16: Half precision (fastest, standard)\n"
+                        "• bf16: BFloat16 (better dynamic range, requires Ampere+ GPU)\n"
+                        "• bf32: Float32 with TF32 enabled (Ampere+ GPU)"
+                    )
+                ),
                 io.Boolean.Input("enable_debug",
                     default=False,
                     optional=True,
@@ -227,7 +239,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 uniform_batch_size: bool = False, temporal_overlap: int = 0, prepend_frames: int = 0,
                 color_correction: str = "wavelet", input_noise_scale: float = 0.0,
                 latent_noise_scale: float = 0.0, offload_device: str = "none", 
-                enable_debug: bool = False) -> io.NodeOutput:
+                precision: str = "auto", enable_debug: bool = False) -> io.NodeOutput:
         """
         Execute SeedVR2 video upscaling with progress reporting
         
@@ -412,7 +424,8 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 dit_offload_device=dit_offload_device,
                 vae_offload_device=vae_offload_device,
                 tensor_offload_device=tensor_offload_device,
-                debug=debug
+                debug=debug,
+                precision=precision
             )
 
             # Prepare runner with model state management and global cache
@@ -435,6 +448,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 decode_tile_overlap=(decode_tile_overlap, decode_tile_overlap),
                 tile_debug=tile_debug,
                 attention_mode=attention_mode,
+                precision=precision,
                 torch_compile_args_dit=dit_torch_compile_args,
                 torch_compile_args_vae=vae_torch_compile_args
             )
