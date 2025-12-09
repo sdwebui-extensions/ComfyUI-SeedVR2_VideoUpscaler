@@ -412,8 +412,7 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
                 dit_offload_device=dit_offload_device,
                 vae_offload_device=vae_offload_device,
                 tensor_offload_device=tensor_offload_device,
-                debug=debug,
-                precision=precision
+                debug=debug
             )
 
             # Prepare runner with model state management and global cache
