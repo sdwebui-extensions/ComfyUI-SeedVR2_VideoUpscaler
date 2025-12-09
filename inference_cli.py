@@ -461,7 +461,6 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
                     video_writer.release()
             
             frames_written = result.shape[0]
-            chunk_idx = 1
         
         # Single GPU: stream in main process
         else:
@@ -497,7 +496,10 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
         
         if streaming:
             debug.log("", category="none", force=True)
-            debug.log(f"Streaming complete: {frames_written} frames in {chunk_idx} chunks", category="success", force=True)
+            if len(device_list) > 1:
+                debug.log(f"Streaming complete: {frames_written} frames across {len(device_list)} GPUs", category="success", force=True)
+            else:
+                debug.log(f"Streaming complete: {frames_written} frames in {chunk_idx} chunks", category="success", force=True)
         
         debug.log(f"Output saved to: {output_path}", category="file", force=True)
         return frames_written
@@ -557,7 +559,8 @@ def _stream_video_chunks(
     runner_cache: Optional[Dict[str, Any]],
     log_progress: bool = False,
     total_chunks: int = 0,
-    cleanup_timer_name: Optional[str] = None
+    cleanup_timer_name: Optional[str] = None,
+    log_prefix: str = ""
 ) -> Generator[torch.Tensor, None, None]:
     """
     Generator that streams and processes video chunks.
@@ -578,6 +581,7 @@ def _stream_video_chunks(
         log_progress: If True, log chunk progress with separators
         total_chunks: Total chunks for progress display (used if log_progress=True)
         cleanup_timer_name: Optional timer name for memory cleanup logging
+        log_prefix: Optional prefix for log messages (e.g., "[GPU 0] " for worker identification)
     
     Yields:
         Processed frames tensor [T, H, W, C] for each chunk, context frames removed
@@ -614,7 +618,7 @@ def _stream_video_chunks(
                 debug.log("", category="none", force=True)
                 debug.log("━" * 60, category="none", force=True)
             debug.log("", category="none", force=True)
-            debug.log(f"Chunk {chunk_idx}/{total_chunks}: {new_frames.shape[0]} new + {context_count} context frames", 
+            debug.log(f"{log_prefix}Chunk {chunk_idx}/{total_chunks}: {new_frames.shape[0]} new + {context_count} context frames", 
                      category="generation", force=True)
             debug.log("", category="none", force=True)
         
@@ -982,6 +986,7 @@ def _worker_process(
         # Enable model caching within worker only if requested
         runner_cache = {} if (args.cache_dit or args.cache_vae) else None
         
+        total_chunks = (segment_frames + chunk_size - 1) // chunk_size
         results = []
         for result in _stream_video_chunks(
             cap=cap,
@@ -991,7 +996,10 @@ def _worker_process(
             args=worker_args,
             device_id="0",
             debug=worker_debug,
-            runner_cache=runner_cache
+            runner_cache=runner_cache,
+            log_progress=total_chunks > 1,
+            total_chunks=total_chunks,
+            log_prefix=f"[GPU {proc_idx}] "
         ):
             results.append(result.cpu())
         
