@@ -39,6 +39,7 @@ ensure_triton_compat()
 import torch
 import types
 import os
+from typing import Dict, Any, Optional
 
 
 # Flash Attention & Triton Compatibility Layer
@@ -54,8 +55,15 @@ except ImportError:
 try:
     import sageattention
     SAGE_ATTN_AVAILABLE = True
+    try:
+        from sageattention import sageattn_varlen
+        # Basic check to see if it's functional or mock
+        SAGE_ATTN_VARLEN_AVAILABLE = True
+    except ImportError:
+        SAGE_ATTN_VARLEN_AVAILABLE = False
 except ImportError:
     SAGE_ATTN_AVAILABLE = False
+    SAGE_ATTN_VARLEN_AVAILABLE = False
 
 
 def validate_flash_attention_availability(requested_mode: str, debug=None) -> str:
@@ -87,20 +95,35 @@ def validate_flash_attention_availability(requested_mode: str, debug=None) -> st
         
         return 'sdpa'
 
-    if requested_mode in ['sd2', 'sd3'] and not SAGE_ATTN_AVAILABLE:
-        error_msg = (
-            f"Cannot use '{requested_mode}' attention mode: SageAttention is not installed.\n"
-            f"\n"
-            f"SageAttention provides speedup on some hardware.\n"
-            f"Falling back to PyTorch SDPA (scaled dot-product attention).\n"
-            f"\n"
-            f"To fix this issue:\n"
-            f"  1. Install SageAttention: pip install sageattention\n"
-            f"  2. OR change attention_mode to 'sdpa' (default, always available)\n"
-        )
-        if debug:
-             debug.log(error_msg, level="WARNING", category="setup", force=True)
-        return 'sdpa'
+    if requested_mode in ['sa2', 'sa3']:
+        if not SAGE_ATTN_AVAILABLE:
+            if debug:
+                 debug.log(f"SageAttention not installed. Falling back from '{requested_mode}' to Flash Attention 2...", level="WARNING", category="setup", force=True)
+            # Fallback to check FA2
+            return validate_flash_attention_availability('flash_attn', debug)
+
+        elif not SAGE_ATTN_VARLEN_AVAILABLE:
+             if debug:
+                 debug.log(f"SageAttention installed but 'sageattn_varlen' not found. Falling back from '{requested_mode}' to Flash Attention 2...", level="WARNING", category="setup", force=True)
+             # Fallback to check FA2
+             return validate_flash_attention_availability('flash_attn', debug)
+
+        # If the user explicitly requested sa3, we check for version compatibility.
+        # If version is unknown or insufficient, we fallback to sa2.
+        if requested_mode == 'sa3':
+             try:
+                 version = sageattention.__version__
+                 # Assuming sa3 requires at least a certain version or just presence of version string.
+                 # If we can read version, we assume it's compliant enough or user knows what they are doing.
+                 if debug:
+                     debug.log(f"SageAttention version {version} detected. Using installed kernel for 'sa3' mode.", category="setup", force=True)
+             except AttributeError:
+                 # Version unknown -> Assume it's an older version (sa2) and fallback
+                 if debug:
+                     debug.log("SageAttention version unknown (likely v2 or older). Falling back from 'sa3' to 'sa2'...", level="WARNING", category="setup", force=True)
+                 return validate_flash_attention_availability('sa2', debug)
+
+        pass
     
     return requested_mode
 
@@ -242,6 +265,28 @@ def _probe_bfloat16_support() -> bool:
 
 BFLOAT16_SUPPORTED = _probe_bfloat16_support()
 COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
+
+def log_system_capabilities(debug=None):
+    """Log installed attention backends and versions at startup."""
+    if not debug:
+        return
+
+    # SageAttention
+    sa_status = "Available" if SAGE_ATTN_AVAILABLE else "Not Installed"
+    if SAGE_ATTN_AVAILABLE:
+        try:
+            sa_version = sageattention.__version__
+            sa_status += f" (v{sa_version})"
+        except AttributeError:
+            sa_status += " (Version Unknown)"
+
+    # FlashAttention
+    fa_status = "Available" if FLASH_ATTN_AVAILABLE else "Not Installed"
+
+    # Triton
+    triton_status = "Available" if TRITON_AVAILABLE else "Not Installed"
+
+    debug.log(f"Attention Backends: SageAttention={sa_status} | FlashAttention={fa_status} | Triton={triton_status}", category="info", force=True)
 
 def detect_high_end_system() -> Dict[str, Any]:
     """
@@ -486,6 +531,12 @@ class FP8CompatibleDiT(torch.nn.Module):
     
     def _is_attention_layer(self, name: str, module: torch.nn.Module) -> bool:
         """Identify if a module is an attention layer"""
+        module_type_name = type(module).__name__
+
+        # Skip FlashAttentionVarlen modules - they manage their own attention backends
+        if module_type_name == 'FlashAttentionVarlen':
+            return False
+
         attention_keywords = [
             'attention', 'attn', 'self_attn', 'cross_attn', 'mhattn', 'multihead',
             'transformer_block', 'dit_block'
@@ -496,7 +547,7 @@ class FP8CompatibleDiT(torch.nn.Module):
             return True
         
         # Check by module type
-        module_type = type(module).__name__.lower()
+        module_type = module_type_name.lower()
         if any(keyword in module_type for keyword in attention_keywords):
             return True
         

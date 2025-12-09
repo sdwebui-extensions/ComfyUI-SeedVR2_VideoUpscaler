@@ -73,7 +73,8 @@ from ..optimization.compatibility import (
     FP8CompatibleDiT,
     TRITON_AVAILABLE,
     validate_flash_attention_availability,
-    detect_high_end_system
+    detect_high_end_system,
+    log_system_capabilities
 )
 from ..optimization.blockswap import is_blockswap_enabled, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
@@ -172,7 +173,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     Generate human-readable description of attention mode configuration.
     
     Args:
-        attention_mode: Attention mode string ('sdpa' or 'flash_attn' or 'sd2' or 'sd3')
+        attention_mode: Attention mode string ('sdpa' or 'flash_attn' or 'sa2' or 'sa3')
         
     Returns:
         Human-readable description string
@@ -183,8 +184,8 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     mode_descriptions = {
         'sdpa': 'PyTorch SDPA',
         'flash_attn': 'Flash Attention 2',
-        'sd2': 'SageAttention v2',
-        'sd3': 'SageAttention v3'
+        'sa2': 'SageAttention v2',
+        'sa3': 'SageAttention v3'
     }
     
     return mode_descriptions.get(attention_mode, attention_mode)
@@ -796,6 +797,9 @@ def configure_runner(
     if debug is None:
         raise ValueError("Debug instance must be provided to configure_runner")
     
+    # Log installed attention backends and versions
+    log_system_capabilities(debug)
+
     # Phase 1: Initialize cache and get cached models
     cache_context = _initialize_cache_context(
         dit_cache, vae_cache, dit_id, vae_id, 
@@ -1215,7 +1219,10 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
                  compute_dtype = torch.float32
                  # We will handle TF32 setting globally elsewhere or here if needed
 
-            debug.log(f"Applying {attention_mode} attention mode and {compute_dtype} compute dtype to model", category="setup")
+            # Log final decision prominently
+            mode_desc = _describe_attention_mode(attention_mode)
+            debug.log(f"Using Attention Mode: {mode_desc}", category="info", force=True)
+            debug.log(f"Using Compute Dtype: {compute_dtype}", category="info", force=True)
             
             # Get the actual model (unwrap if needed)
             actual_model = model.dit_model if hasattr(model, 'dit_model') else model

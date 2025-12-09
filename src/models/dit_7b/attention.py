@@ -97,12 +97,12 @@ def _call_flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen
     )
 
 @torch._dynamo.disable
-def _call_sage_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal=False, implementation="sd2"):
+def _call_sage_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal=False, implementation="sa2"):
     """
     Wrapper for SageAttention variable length function.
 
     Args:
-        implementation: "sd2" (SageAttention v2) or "sd3" (SageAttention v3)
+        implementation: "sa2" (SageAttention v2) or "sa3" (SageAttention v3)
     """
     if not SAGE_ATTN_AVAILABLE:
         raise ImportError("SageAttention is not available")
@@ -134,6 +134,10 @@ def _call_sage_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_
 
     # Calling sageattn_varlen
     # Signature assumptions: q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale
+    if not hasattr(_call_sage_attn_varlen_func, "_logged"):
+        print(f"🚀 Executing SageAttention ({implementation}) kernel for the first time")
+        _call_sage_attn_varlen_func._logged = True
+
     return sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale)
 
 
@@ -194,7 +198,7 @@ class FlashAttentionVarlen(nn.Module):
                 q, k, v, cu_seqlens_q, cu_seqlens_k, 
                 max_seqlen_q, max_seqlen_k, **kwargs
             )
-        elif self.attention_mode in ['sd2', 'sd3']:
+        elif self.attention_mode in ['sa2', 'sa3']:
             # Use SageAttention
             # Extract causal flag if present in kwargs, default to False
             is_causal = kwargs.get('causal', False)
