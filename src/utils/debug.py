@@ -15,30 +15,28 @@ from ..optimization.memory_manager import (
     get_vram_usage, 
     get_basic_vram_info, 
     get_ram_usage, 
-    reset_vram_peak, 
-    is_vram_overflow_allowed,
-    was_vram_limit_change_attempted,
+    reset_vram_peak,
     is_mps_available,
     is_cuda_available
 )
 from ..utils.constants import __version__
 
 
-def _format_peak_with_swap(peak_gb: float, total_vram_gb: float) -> str:
-    """Format peak memory, showing overflow breakdown on Windows.
+def _format_peak_with_overflow(peak_gb: float, total_vram_gb: float) -> str:
+    """Format peak reserved memory, showing overflow breakdown on Windows.
     
     Args:
         peak_gb: Peak reserved memory from PyTorch
         total_vram_gb: Physical GPU VRAM capacity
     """
     if total_vram_gb <= 0:
-        return f"{peak_gb:.2f}GB"
+        return f"{peak_gb:.2f}GB reserved"
     
     overflow_gb = peak_gb - total_vram_gb
     if overflow_gb <= 0 or platform.system() != 'Windows':
-        return f"{peak_gb:.2f}GB"
+        return f"{peak_gb:.2f}GB reserved"
     
-    return f"{peak_gb:.2f}GB ({total_vram_gb:.0f}GB GPU + {overflow_gb:.2f}GB system RAM)"
+    return f"{peak_gb:.2f}GB reserved ({total_vram_gb:.0f}GB GPU + {overflow_gb:.2f}GB overflow)"
 
 
 class Debug:
@@ -176,11 +174,6 @@ class Debug:
         # Environment info - only in debug mode
         if self.enabled:
             self._print_environment_info(cli)
-        
-        # VRAM overflow status - warnings always shown
-        vram_warning_shown = self._print_vram_overflow_status()
-
-        self.log("", category="none", force=vram_warning_shown)
 
     def _print_environment_info(self, cli: bool = False) -> None:
         """Print concise environment info for bug reports - zero cost when debug disabled"""
@@ -242,21 +235,7 @@ class Debug:
         self.log(f"Python: {py_ver} | PyTorch: {torch_ver} | Flash Attn: {flash_str} | Triton: {triton_str}", category="info")
         cuda_line = f"CUDA: {cuda_ver} | cuDNN: {cudnn_ver}"
         self.log(f"{cuda_line} | ComfyUI: {comfy_str}" if comfy_str else cuda_line, category="info")
-
-    def _print_vram_overflow_status(self) -> bool:
-        """Print VRAM overflow status (Windows only). Returns True if warning was printed."""
-        if platform.system() != 'Windows':
-            return False
-        
-        if was_vram_limit_change_attempted():
-            self.log("allow_vram_overflow setting changed - restart ComfyUI to apply", level="WARNING", category="memory", force=True)
-            return True
-        elif is_vram_overflow_allowed():
-            self.log("allow_vram_overflow: enabled - may cause severe slowdown if physical VRAM exceeded", level="WARNING", category="memory", force=True)
-            return True
-        else:
-            self.log("allow_vram_overflow: disabled (recommended)", category="success")
-            return False
+        self.log("", category="none")
 
     def print_footer(self) -> None:
         """Print the footer with links - always displayed"""
@@ -430,7 +409,7 @@ class Debug:
         # Overflow warning (Windows only - WDDM can page to system RAM)
         overflow = memory_info.get('vram_overflow', 0.0)
         
-        if overflow > 0 and platform.system() == 'Windows' and not is_vram_overflow_allowed():
+        if overflow > 0 and platform.system() == 'Windows':
             self.log(f"VRAM overflow: {overflow:.2f}GB paged to system RAM - severe slowdown expected. "
                      "Consider optimizing (e.g., reduce resolution, batch size, enable BlockSwap, VAE tiling...).",
                      level="WARNING", category="memory", force=True)
@@ -494,11 +473,10 @@ class Debug:
                 metrics['vram_overflow'] = max(0.0, metrics['vram_peak_rsv'] - metrics['vram_total'])
                 
                 backend = "Unified Memory" if is_mps else "VRAM"
-                peak_alloc_str = _format_peak_with_swap(metrics['vram_peak_alloc'], metrics['vram_total'])
                 metrics['summary_vram'] = (
                     f"  [{backend}] {metrics['vram_allocated']:.2f}GB allocated / "
                     f"{metrics['vram_reserved']:.2f}GB reserved / "
-                    f"Peak: {peak_alloc_str} / "
+                    f"Peak: {metrics['vram_peak_alloc']:.2f}GB / "
                     f"{metrics['vram_free']:.2f}GB free / "
                     f"{metrics['vram_total']:.2f}GB total"
                 )
@@ -677,8 +655,8 @@ class Debug:
             if is_mps:
                 self.log(f"{phase_num}. {phase_name}: {alloc:.2f}GB", category="memory", indent_level=1, force=force)
             else:
-                rsv_str = _format_peak_with_swap(rsv, total_vram_gb)
-                self.log(f"{phase_num}. {phase_name}: VRAM {alloc:.2f}GB allocated, {rsv_str} reserved | RAM {ram:.2f}GB", category="memory", indent_level=1, force=force)
+                rsv_str = _format_peak_with_overflow(rsv, total_vram_gb)
+                self.log(f"{phase_num}. {phase_name}: VRAM {alloc:.2f}GB allocated, {rsv_str} | RAM {ram:.2f}GB", category="memory", indent_level=1, force=force)
         
         overall_alloc = max(self.phase_vram_peaks_alloc.values()) if self.phase_vram_peaks_alloc else 0
         overall_rsv = max(self.phase_vram_peaks_rsv.values()) if self.phase_vram_peaks_rsv else 0
@@ -687,8 +665,8 @@ class Debug:
         if is_mps:
             self.log(f"Overall peak: {overall_alloc:.2f}GB", category="memory", force=force)
         else:
-            overall_rsv_str = _format_peak_with_swap(overall_rsv, total_vram_gb)
-            self.log(f"Overall peak: VRAM {overall_alloc:.2f}GB allocated, {overall_rsv_str} reserved | RAM {overall_ram:.2f}GB", category="memory", force=force)
+            overall_rsv_str = _format_peak_with_overflow(overall_rsv, total_vram_gb)
+            self.log(f"Overall peak: VRAM {overall_alloc:.2f}GB allocated, {overall_rsv_str} | RAM {overall_ram:.2f}GB", category="memory", force=force)
     
     @torch._dynamo.disable  # Skip tracing to avoid time.time() warnings
     def _store_checkpoint(self, label: str, metrics: Dict[str, Any]) -> None:

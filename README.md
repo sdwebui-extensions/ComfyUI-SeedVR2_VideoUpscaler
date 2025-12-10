@@ -418,12 +418,6 @@ Configure the DiT (Diffusion Transformer) model for video upscaling.
   - `sdpa`: PyTorch scaled_dot_product_attention (default, stable, always available)
   - `flash_attn`: Flash Attention 2 (faster on supported hardware, requires flash-attn package)
 
-- **allow_vram_overflow**: Windows only - allow VRAM to overflow to system RAM
-  - `False` (default): Strict VRAM limit - faster when within limits
-  - `True`: Allow overflow - prevents OOM but causes severe slowdown
-  - Last resort when other optimizations are insufficient
-  - Requires ComfyUI restart to change
-
 - **torch_compile_args**: Connect to SeedVR2 Torch Compile Settings node for 20-40% speedup
 
 **BlockSwap Explained:**

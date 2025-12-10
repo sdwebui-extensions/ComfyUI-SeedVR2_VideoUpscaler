@@ -79,7 +79,6 @@ else:
     # Pre-parse arguments that must be handled before torch import
     _pre_parser = argparse.ArgumentParser(add_help=False)
     _pre_parser.add_argument("--cuda_device", type=str, default=None)
-    _pre_parser.add_argument("--allow_vram_overflow", action="store_true")
     _pre_args, _ = _pre_parser.parse_known_args()
     
     if _pre_args.cuda_device is not None:
@@ -128,12 +127,8 @@ from src.core.generation_phases import (
     postprocess_all_batches
 )
 from src.utils.debug import Debug
-from src.optimization.memory_manager import clear_memory, configure_vram_limit, get_gpu_backend, is_cuda_available
+from src.optimization.memory_manager import clear_memory, get_gpu_backend, is_cuda_available
 debug = Debug(enabled=False)  # Will be enabled via --debug CLI flag
-
-# Configure VRAM limit (must be before any CUDA allocations)
-if platform.system() != "Darwin":
-    configure_vram_limit(allow_overflow=_pre_args.allow_vram_overflow)
 
 # =============================================================================
 # Device Management Helpers
@@ -1335,9 +1330,6 @@ Examples:
                              "Requires --dit_offload_device. Default: 0 (disabled)")
     blockswap_group.add_argument("--swap_io_components", action="store_true",
                         help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device")
-    blockswap_group.add_argument("--allow_vram_overflow", action="store_true",
-                        help="Windows only: Allow VRAM overflow to system RAM. Prevents OOM but causes severe slowdown. "
-                             "Last resort when other optimizations are insufficient.")
     
     # VAE Tiling
     vae_group = parser.add_argument_group('VAE tiling (for high resolution upscale)')
