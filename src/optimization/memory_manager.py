@@ -12,7 +12,7 @@ import time
 import psutil
 import platform
 from typing import Tuple, Dict, Any, Optional, List, Union
-    
+
 
 def _device_str(device: Union[torch.device, str]) -> str:
     """Normalized uppercase device string for comparison and logging. MPS variants → 'MPS'."""
@@ -43,27 +43,6 @@ def get_gpu_backend() -> str:
     if is_mps_available():
         return 'mps'
     return 'cpu'
-
-
-def get_memory_architecture() -> str:
-    """Get memory architecture type for swap/overflow detection.
-    
-    This combines GPU backend with OS platform to determine how
-    GPU memory overflow is handled:
-    
-    Returns:
-        'unified': macOS unified memory (MPS) - GPU/CPU share memory pool
-        'discrete_paged': Windows WDDM - GPU memory can page to system RAM
-        'discrete_strict': Linux - No automatic GPU paging, OOM on overflow
-        'cpu_only': No GPU backend available
-    """
-    if is_mps_available():
-        return 'unified'
-    if is_cuda_available():
-        if platform.system() == 'Windows':
-            return 'discrete_paged'
-        return 'discrete_strict'
-    return 'cpu_only'
 
 
 def get_device_list(include_none: bool = False, include_cpu: bool = False) -> List[str]:
@@ -215,7 +194,7 @@ def was_vram_limit_change_attempted() -> bool:
     return _vram_limit_change_attempted
 
 
-def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug'] = None) -> Tuple[float, float, float]:
+def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug'] = None) -> Tuple[float, float, float, float]:
     """
     Get current VRAM usage metrics for monitoring.
     Used for tracking memory consumption during processing.
@@ -225,8 +204,8 @@ def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug
         debug: Optional debug instance for logging
     
     Returns:
-        tuple: (allocated_gb, reserved_gb, max_reserved_gb)
-               Returns (0, 0, 0) if no GPU available
+        tuple: (allocated_gb, reserved_gb, peak_allocated_gb, peak_reserved_gb)
+               Returns (0, 0, 0, 0) if no GPU available
     """
     try:
         if is_cuda_available():
@@ -236,18 +215,19 @@ def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug
                 device = torch.device(device)
             allocated = torch.cuda.memory_allocated(device) / (1024**3)
             reserved = torch.cuda.memory_reserved(device) / (1024**3)
-            max_reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
-            return allocated, reserved, max_reserved
+            peak_allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
+            peak_reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
+            return allocated, reserved, peak_allocated, peak_reserved
         elif is_mps_available():
             # MPS doesn't support per-device queries - uses global memory tracking
             allocated = torch.mps.current_allocated_memory() / (1024**3)
             reserved = torch.mps.driver_allocated_memory() / (1024**3)
-            max_allocated = allocated  # MPS doesn't track peak separately
-            return allocated, reserved, max_allocated
+            # MPS doesn't track peak separately
+            return allocated, reserved, allocated, reserved
     except Exception as e:
         if debug:
             debug.log(f"Failed to get VRAM usage: {e}", level="WARNING", category="memory", force=True)
-    return 0.0, 0.0, 0.0
+    return 0.0, 0.0, 0.0, 0.0
 
 
 def get_ram_usage(debug: Optional['Debug'] = None) -> Tuple[float, float, float, float]:

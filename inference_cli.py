@@ -1336,8 +1336,8 @@ Examples:
     blockswap_group.add_argument("--swap_io_components", action="store_true",
                         help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device")
     blockswap_group.add_argument("--allow_vram_overflow", action="store_true",
-                        help="Allow VRAM overflow to system RAM. Prevents OOM but may cause severe slowdown. "
-                             "Last resort when other memory optimizations are insufficient. No effect on Apple Silicon (unified memory).")
+                        help="Windows only: Allow VRAM overflow to system RAM. Prevents OOM but causes severe slowdown. "
+                             "Last resort when other optimizations are insufficient.")
     
     # VAE Tiling
     vae_group = parser.add_argument_group('VAE tiling (for high resolution upscale)')

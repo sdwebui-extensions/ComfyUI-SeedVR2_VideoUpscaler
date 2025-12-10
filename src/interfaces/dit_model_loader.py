@@ -116,12 +116,12 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                     default=False,
                     optional=True,
                     tooltip=(
-                        "Allow VRAM to overflow to system RAM when physical VRAM is exceeded.\n"
-                        "• False (default): Strict VRAM limit - OOM if exceeded (faster when within limits)\n"
-                        "• True: Allow overflow to RAM - prevents OOM but may cause severe slowdown\n"
+                        "Windows only: Allow VRAM to overflow to system RAM.\n"
+                        "• False (default): Strict VRAM limit - faster when within limits\n"
+                        "• True: Allow overflow - prevents OOM but may cause severe slowdown\n"
                         "\n"
-                        "Last resort when other memory optimizations are insufficient.\n"
-                        "Requires ComfyUI restart to change. No effect on Apple Silicon (unified memory)."
+                        "Last resort when other optimizations are insufficient.\n"
+                        "Requires ComfyUI restart to change."
                     )
                 ),
                 io.Custom("TORCH_COMPILE_ARGS").Input("torch_compile_args",
