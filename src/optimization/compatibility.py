@@ -8,6 +8,7 @@ Extracted from: seedvr2.py (lines 1045-1630)
 # Compatibility shims - Must run before any torch/diffusers import
 import sys
 import types
+import importlib.machinery
 
 
 def ensure_triton_compat():
@@ -44,8 +45,6 @@ def ensure_flash_attn_safe():
         import flash_attn
     except (ImportError, OSError):
         # DLL broken or not installed - create stub with proper __spec__
-        import importlib.machinery
-        
         stub = types.ModuleType('flash_attn')
         stub.__spec__ = importlib.machinery.ModuleSpec('flash_attn', None)
         stub.__file__ = None
@@ -68,16 +67,18 @@ def ensure_xformers_flash_compat():
     try:
         from xformers import _C_flashattention  # noqa: F401
     except (ImportError, OSError):
-        # DLL broken or not installed - create stub that fails gracefully
+        # DLL broken or not installed - create stub with proper __spec__
         class _FailingStub(types.ModuleType):
             """Stub that lets xformers gracefully disable its flash backend."""
             def __getattr__(self, name):
-                # Dunder attributes: raise AttributeError (normal Python behavior)
-                if name.startswith('__') and name.endswith('__'):
-                    raise AttributeError(name)
-                # xformers functional attributes: raise ImportError so xformers catches it
                 raise ImportError("_C_flashattention unavailable")
-        sys.modules['xformers._C_flashattention'] = _FailingStub('xformers._C_flashattention')
+        
+        stub = _FailingStub('xformers._C_flashattention')
+        stub.__spec__ = importlib.machinery.ModuleSpec('xformers._C_flashattention', None)
+        stub.__file__ = None
+        stub.__path__ = []
+        stub.__loader__ = None
+        sys.modules['xformers._C_flashattention'] = stub
 
 
 # Run all shims immediately on import, before torch/diffusers
