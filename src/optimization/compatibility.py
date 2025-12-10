@@ -89,6 +89,7 @@ ensure_xformers_flash_compat()
 
 import torch
 import os
+from typing import Dict, Any, Optional
 
 
 # Flash Attention & Triton Compatibility Layer
@@ -102,16 +103,31 @@ except (ImportError, AttributeError, OSError):
     flash_attn_varlen_func = None
     FLASH_ATTN_AVAILABLE = False
 
+# 1.1 SageAttention - speedup for attention operations
+try:
+    import sageattention
+    SAGE_ATTN_AVAILABLE = True
+    try:
+        from sageattention import sageattn_varlen
+        # Basic check to see if it's functional or mock
+        SAGE_ATTN_VARLEN_AVAILABLE = True
+    except ImportError:
+        SAGE_ATTN_VARLEN_AVAILABLE = False
+except ImportError:
+    SAGE_ATTN_AVAILABLE = False
+    SAGE_ATTN_VARLEN_AVAILABLE = False
+
+
 def validate_flash_attention_availability(requested_mode: str, debug=None) -> str:
     """
-    Validate Flash Attention availability and warn if fallback needed.
+    Validate attention mode availability and warn if fallback needed.
     
     Args:
-        requested_mode: Either 'flash_attn' or 'sdpa'
+        requested_mode: 'flash_attn', 'sdpa', 'sd2', or 'sd3'
         debug: Optional debug instance for logging
         
     Returns:
-        Validated mode ('flash_attn' or 'sdpa')
+        Validated mode
     """
     if requested_mode == 'flash_attn' and not FLASH_ATTN_AVAILABLE:
         error_msg = (
@@ -130,6 +146,36 @@ def validate_flash_attention_availability(requested_mode: str, debug=None) -> st
             debug.log(error_msg, level="WARNING", category="setup", force=True)
         
         return 'sdpa'
+
+    if requested_mode in ['sa2', 'sa3']:
+        if not SAGE_ATTN_AVAILABLE:
+            if debug:
+                 debug.log(f"SageAttention not installed. Falling back from '{requested_mode}' to Flash Attention 2...", level="WARNING", category="setup", force=True)
+            # Fallback to check FA2
+            return validate_flash_attention_availability('flash_attn', debug)
+
+        elif not SAGE_ATTN_VARLEN_AVAILABLE:
+             if debug:
+                 debug.log(f"SageAttention installed but 'sageattn_varlen' not found. Falling back from '{requested_mode}' to Flash Attention 2...", level="WARNING", category="setup", force=True)
+             # Fallback to check FA2
+             return validate_flash_attention_availability('flash_attn', debug)
+
+        # If the user explicitly requested sa3, we check for version compatibility.
+        # If version is unknown or insufficient, we fallback to sa2.
+        if requested_mode == 'sa3':
+             try:
+                 version = sageattention.__version__
+                 # Assuming sa3 requires at least a certain version or just presence of version string.
+                 # If we can read version, we assume it's compliant enough or user knows what they are doing.
+                 if debug:
+                     debug.log(f"SageAttention version {version} detected. Using installed kernel for 'sa3' mode.", category="setup", force=True)
+             except AttributeError:
+                 # Version unknown -> Assume it's an older version (sa2) and fallback
+                 if debug:
+                     debug.log("SageAttention version unknown (likely v2 or older). Falling back from 'sa3' to 'sa2'...", level="WARNING", category="setup", force=True)
+                 return validate_flash_attention_availability('sa2', debug)
+
+        pass
     
     return requested_mode
 
@@ -271,6 +317,55 @@ def _probe_bfloat16_support() -> bool:
 
 BFLOAT16_SUPPORTED = _probe_bfloat16_support()
 COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
+
+def log_system_capabilities(debug=None):
+    """Log installed attention backends and versions at startup."""
+    if not debug:
+        return
+
+    # SageAttention
+    sa_status = "Available" if SAGE_ATTN_AVAILABLE else "Not Installed"
+    if SAGE_ATTN_AVAILABLE:
+        try:
+            sa_version = sageattention.__version__
+            sa_status += f" (v{sa_version})"
+        except AttributeError:
+            sa_status += " (Version Unknown)"
+
+    # FlashAttention
+    fa_status = "Available" if FLASH_ATTN_AVAILABLE else "Not Installed"
+
+    # Triton
+    triton_status = "Available" if TRITON_AVAILABLE else "Not Installed"
+
+    debug.log(f"Attention Backends: SageAttention={sa_status} | FlashAttention={fa_status} | Triton={triton_status}", category="info", force=True)
+
+def detect_high_end_system() -> Dict[str, Any]:
+    """
+    Detect high-end systems (16GB+ VRAM, etc.) and return optimized defaults.
+
+    Returns:
+        Dict with recommended settings or empty if no specific optimizations found.
+    """
+    optimizations = {}
+    try:
+        # Basic VRAM check
+        if torch.cuda.is_available():
+            device = torch.device("cuda:0")
+            props = torch.cuda.get_device_properties(device)
+            total_vram_gb = props.total_memory / (1024**3)
+
+            # High-end GPU check (e.g., 5070ti/4080/4090/etc with >15GB VRAM)
+            if total_vram_gb >= 15.5:
+                optimizations['high_vram'] = True
+                optimizations['recommended_dtype'] = 'bf16' if BFLOAT16_SUPPORTED else 'fp16'
+                # For 16GB cards, BlockSwap might still be useful for 7B models but maybe less aggressive
+                optimizations['block_swap_recommendation'] = 'moderate'
+
+    except Exception:
+        pass
+
+    return optimizations
 
 
 def call_rope_with_stability(method, *args, **kwargs):

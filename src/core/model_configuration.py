@@ -72,7 +72,9 @@ from ..models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalCon
 from ..optimization.compatibility import (
     FP8CompatibleDiT,
     TRITON_AVAILABLE,
-    validate_flash_attention_availability
+    validate_flash_attention_availability,
+    detect_high_end_system,
+    log_system_capabilities
 )
 from ..optimization.blockswap import is_blockswap_enabled, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
@@ -171,7 +173,7 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     Generate human-readable description of attention mode configuration.
     
     Args:
-        attention_mode: Attention mode string ('sdpa' or 'flash_attn')
+        attention_mode: Attention mode string ('sdpa' or 'flash_attn' or 'sa2' or 'sa3')
         
     Returns:
         Human-readable description string
@@ -181,7 +183,9 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
     
     mode_descriptions = {
         'sdpa': 'PyTorch SDPA',
-        'flash_attn': 'Flash Attention 2'
+        'flash_attn': 'Flash Attention 2',
+        'sa2': 'SageAttention v2',
+        'sa3': 'SageAttention v3'
     }
     
     return mode_descriptions.get(attention_mode, attention_mode)
@@ -745,6 +749,7 @@ def configure_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
+    precision: str = 'auto',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
 ) -> Tuple[VideoDiffusionInfer, Dict[str, Any]]:
@@ -792,6 +797,9 @@ def configure_runner(
     if debug is None:
         raise ValueError("Debug instance must be provided to configure_runner")
     
+    # Log installed attention backends and versions
+    log_system_capabilities(debug)
+
     # Phase 1: Initialize cache and get cached models
     cache_context = _initialize_cache_context(
         dit_cache, vae_cache, dit_id, vae_id, 
@@ -814,6 +822,9 @@ def configure_runner(
         block_swap_config, debug
     )
     
+    # Store precision setting
+    runner._precision = precision
+
     # Phase 4: Setup models (load from cache or create new)
     _setup_models(
         runner, cache_context, dit_model, vae_model, 
@@ -894,6 +905,16 @@ def _configure_runner_settings(
     runner._vae_offload_device = ctx['vae_offload_device']
     runner._tensor_offload_device = ctx['tensor_offload_device']
     runner._compute_dtype = ctx['compute_dtype']
+
+    # Auto-detection for 5070ti/similar hardware
+    system_opts = detect_high_end_system()
+    if system_opts.get('high_vram', False):
+        if debug:
+            debug.log(f"Detected high-end system optimizations: {system_opts}", category="setup")
+        # Apply recommended settings if not overridden
+        # For example, we might favor speed/quality trade-offs differently
+        # Here we just log it as the user has control via UI, but we could set defaults if they were None
+        pass
 
     runner.debug = debug
 
@@ -1165,16 +1186,31 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
     """
     if is_dit:
         # DiT-specific
-        # Apply FP8 compatibility wrapper with compute_dtype
+        # Determine compute_dtype upfront (respect precision setting)
+        compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
+
+        # Apply precision override if set (redundant if ctx already handled it, but safe)
+        precision_override = getattr(runner, '_precision', 'auto')
+        if precision_override == 'fp16':
+            compute_dtype = torch.float16
+        elif precision_override == 'bf16':
+            compute_dtype = torch.bfloat16
+        elif precision_override == 'bf32':
+             # TF32 context
+             compute_dtype = torch.float32
+
+        # Apply FP8 compatibility wrapper with correct compute_dtype
         if not isinstance(model, FP8CompatibleDiT):
             debug.log("Applying FP8/RoPE compatibility wrapper to DiT model", category="setup")
             debug.start_timer("FP8CompatibleDiT")
-            # Get compute_dtype from runner if available, fallback to bfloat16
-            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
             model = FP8CompatibleDiT(model, debug, compute_dtype=compute_dtype, skip_conversion=False)
             debug.end_timer("FP8CompatibleDiT", "FP8/RoPE compatibility wrapper application")
         else:
             debug.log("Reusing existing FP8/RoPE compatibility wrapper", category="reuse")
+            # Update compute_dtype if wrapper exists
+            if model.compute_dtype != compute_dtype:
+                debug.log(f"Updating FP8 wrapper compute_dtype to {compute_dtype}", category="setup")
+                model.compute_dtype = compute_dtype
         
         # Apply attention mode and compute_dtype to all FlashAttentionVarlen modules
         if hasattr(runner, '_dit_attention_mode'):
@@ -1183,9 +1219,10 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             # Validate and get final attention_mode (with warning if fallback needed)
             attention_mode = validate_flash_attention_availability(requested_attention_mode, debug)
             
-            # Get compute_dtype from runner
-            compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)            
-            debug.log(f"Applying {attention_mode} attention mode and {compute_dtype} compute dtype to model", category="setup")
+            # Log final decision prominently
+            mode_desc = _describe_attention_mode(attention_mode)
+            debug.log(f"Using Attention Mode: {mode_desc}", category="info", force=True)
+            debug.log(f"Using Compute Dtype: {compute_dtype}", category="info", force=True)
             
             # Get the actual model (unwrap if needed)
             actual_model = model.dit_model if hasattr(model, 'dit_model') else model
