@@ -5,9 +5,10 @@ Contains FP8/FP16 compatibility layers and wrappers for different model architec
 Extracted from: seedvr2.py (lines 1045-1630)
 """
 
-# Triton compatibility shim for bitsandbytes 0.45+ with triton 3.0+
-# Must be called before any diffusers import
+# Compatibility shims - Must run before any torch/diffusers import
 import sys
+import types
+
 
 def ensure_triton_compat():
     """Create minimal triton.ops stubs only if missing, to allow bitsandbytes import."""
@@ -20,8 +21,6 @@ def ensure_triton_compat():
     except (ImportError, ModuleNotFoundError, AttributeError):
         pass
     
-    import types
-    
     if 'triton.ops' not in sys.modules:
         sys.modules['triton.ops'] = types.ModuleType('triton.ops')
     
@@ -32,12 +31,62 @@ def ensure_triton_compat():
     sys.modules['triton.ops'].matmul_perf_model = matmul_perf
     sys.modules['triton.ops.matmul_perf_model'] = matmul_perf
 
-# Run immediately on import
+
+def ensure_flash_attn_safe():
+    """
+    Pre-test flash_attn package; stub if DLL is broken.
+    Prevents diffusers from crashing when flash_attn has broken DLLs.
+    """
+    if 'flash_attn' in sys.modules:
+        return  # Already loaded
+    
+    try:
+        import flash_attn
+    except (ImportError, OSError):
+        # DLL broken or not installed - create stub with proper __spec__
+        import importlib.machinery
+        
+        stub = types.ModuleType('flash_attn')
+        stub.__spec__ = importlib.machinery.ModuleSpec('flash_attn', None)
+        stub.__file__ = None
+        stub.__path__ = []
+        stub.__loader__ = None
+        # Provide attributes that diffusers/transformers import
+        stub.flash_attn_func = None
+        stub.flash_attn_varlen_func = None
+        sys.modules['flash_attn'] = stub
+
+
+def ensure_xformers_flash_compat():
+    """
+    Pre-test xformers._C_flashattention; stub if DLL is broken.
+    Prevents xformers.ops.fmha.flash from crashing on import.
+    """
+    if 'xformers._C_flashattention' in sys.modules:
+        return  # Already loaded
+    
+    try:
+        from xformers import _C_flashattention  # noqa: F401
+    except (ImportError, OSError):
+        # DLL broken or not installed - create stub that fails gracefully
+        class _FailingStub(types.ModuleType):
+            """Stub that lets xformers gracefully disable its flash backend."""
+            def __getattr__(self, name):
+                # Dunder attributes: raise AttributeError (normal Python behavior)
+                if name.startswith('__') and name.endswith('__'):
+                    raise AttributeError(name)
+                # xformers functional attributes: raise ImportError so xformers catches it
+                raise ImportError("_C_flashattention unavailable")
+        sys.modules['xformers._C_flashattention'] = _FailingStub('xformers._C_flashattention')
+
+
+# Run all shims immediately on import, before torch/diffusers
 ensure_triton_compat()
+ensure_flash_attn_safe()
+ensure_xformers_flash_compat()
 
 
 import torch
-import types
 import os
 
 
@@ -45,8 +94,10 @@ import os
 # 1. Flash Attention - speedup for attention operations
 try:
     from flash_attn import flash_attn_varlen_func
+    # Force load the CUDA extension to verify it's not corrupted
+    import flash_attn_2_cuda  # noqa: F401
     FLASH_ATTN_AVAILABLE = True
-except ImportError:
+except (ImportError, AttributeError, OSError):
     flash_attn_varlen_func = None
     FLASH_ATTN_AVAILABLE = False
 
