@@ -793,8 +793,7 @@ def _process_frames_core(
             dit_offload_device=dit_offload,
             vae_offload_device=vae_offload,
             tensor_offload_device=tensor_offload,
-            debug=debug,
-            precision=args.precision
+            debug=debug
         )
         if runner_cache is not None:
             runner_cache['ctx'] = ctx
@@ -1353,10 +1352,7 @@ Examples:
     perf_group = parser.add_argument_group('Performance optimization')
     perf_group.add_argument("--attention_mode", type=str, default="sdpa",
                         choices=["sdpa", "flash_attn", "sa2", "sa3"],
-                        help="Attention backend: 'sdpa' (default), 'flash_attn' (faster), 'sa2' (SageAttention v2), 'sa3' (SageAttention v3)")
-    perf_group.add_argument("--precision", type=str, default="auto",
-                        choices=["auto", "fp16", "bf16", "bf32"],
-                        help="Compute precision: 'auto' (default), 'fp16', 'bf16', or 'bf32' (TF32)")
+                        help="Attention backend: 'sdpa' (default), 'flash_attn', 'sa2', or 'sa3'")
     perf_group.add_argument("--compile_dit", action="store_true", 
                         help="Enable torch.compile for DiT model (20-40%% speedup, requires PyTorch 2.0+ and Triton)")
     perf_group.add_argument("--compile_vae", action="store_true",

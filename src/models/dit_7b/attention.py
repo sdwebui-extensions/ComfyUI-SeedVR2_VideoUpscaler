@@ -15,16 +15,11 @@
 import torch
 import torch.nn.functional as F
 
-# Import flash_attn with automatic fallback from compatibility layer
-from ...optimization.compatibility import flash_attn_varlen_func, FLASH_ATTN_AVAILABLE, SAGE_ATTN_AVAILABLE
+# Import flash/sage attn with automatic fallback from compatibility layer
+from ...optimization.compatibility import call_flash_attn_varlen, call_sage_attn_varlen
 
 from torch import nn
 
-# Safe import for SageAttention
-try:
-    import sageattention
-except ImportError:
-    sageattention = None
 
 def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None, dropout_p=0.0, softmax_scale=None, causal=False, deterministic=False):
     """
@@ -66,81 +61,6 @@ def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=N
     return torch.cat(output_splits, dim=0)
 
 
-@torch._dynamo.disable
-def _call_flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
-    """
-    Wrapper for flash_attn_varlen_func that handles tensor-to-scalar conversion.
-    
-    This function is excluded from torch.compile because:
-    1. flash_attn is a C++ extension that can't be compiled anyway
-    2. It requires Python int scalars for max_seqlen parameters
-    3. Disabling compilation here keeps the rest of the model compilable
-    """
-    if not FLASH_ATTN_AVAILABLE:
-        raise ImportError("flash_attn is not available")
-    
-    # Convert tensor max_seqlen to Python int if needed
-    if torch.is_tensor(max_seqlen_q):
-        max_seqlen_q = int(max_seqlen_q.item())
-    if torch.is_tensor(max_seqlen_k):
-        max_seqlen_k = int(max_seqlen_k.item())
-    
-    return flash_attn_varlen_func(
-        q=q,
-        k=k,
-        v=v,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_k=cu_seqlens_k,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_k=max_seqlen_k,
-        **kwargs
-    )
-
-@torch._dynamo.disable
-def _call_sage_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal=False, implementation="sa2"):
-    """
-    Wrapper for SageAttention variable length function.
-
-    Args:
-        implementation: "sa2" (SageAttention v2) or "sa3" (SageAttention v3)
-    """
-    if not SAGE_ATTN_AVAILABLE:
-        raise ImportError("SageAttention is not available")
-
-    # SageAttention expects q, k, v as (total_tokens, heads, head_dim)
-    # The input q, k, v here are (total_tokens, heads, head_dim)
-
-    # Convert tensor max_seqlen to Python int if needed
-    if torch.is_tensor(max_seqlen_q):
-        max_seqlen_q = int(max_seqlen_q.item())
-    if torch.is_tensor(max_seqlen_k):
-        max_seqlen_k = int(max_seqlen_k.item())
-
-    # Ensure tensors are contiguous
-    q = q.contiguous()
-    k = k.contiguous()
-    v = v.contiguous()
-
-    # SageAttention API usage
-    # sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale)
-    try:
-         from sageattention import sageattn_varlen
-    except ImportError:
-         # Fallback or error
-         raise ImportError("sageattn_varlen not found in sageattention package")
-
-    # Check if sm_scale is needed (usually 1/sqrt(head_dim))
-    sm_scale = 1.0 / (q.shape[-1] ** 0.5)
-
-    # Calling sageattn_varlen
-    # Signature assumptions: q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale
-    if not hasattr(_call_sage_attn_varlen_func, "_logged"):
-        print(f"🚀 Executing SageAttention ({implementation}) kernel for the first time")
-        _call_sage_attn_varlen_func._logged = True
-
-    return sageattn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, is_causal, sm_scale)
-
-
 class TorchAttention(nn.Module):
     def tflops(self, args, kwargs, output) -> float:
         assert len(args) == 0 or len(args) > 2, "query, key should both provided by args / kwargs"
@@ -169,7 +89,7 @@ class FlashAttentionVarlen(nn.Module):
         Initialize with specified attention backend.
         
         Args:
-            attention_mode: 'flash_attn' or 'sdpa' (validated externally by validate_flash_attention_availability)
+            attention_mode: 'flash_attn' or 'sdpa' (validated externally by validate_attention_mode)
             compute_dtype: Compute dtype for attention (set by pipeline, defaults to None for auto-detection)
         """
         super().__init__()
@@ -194,19 +114,14 @@ class FlashAttentionVarlen(nn.Module):
             v = v.to(self.compute_dtype)
         
         if self.attention_mode == 'flash_attn':
-            return _call_flash_attn_varlen_func(
+            return call_flash_attn_varlen(
                 q, k, v, cu_seqlens_q, cu_seqlens_k, 
                 max_seqlen_q, max_seqlen_k, **kwargs
             )
-        elif self.attention_mode in ['sa2', 'sa3']:
-            # Use SageAttention
-            # Extract causal flag if present in kwargs, default to False
-            is_causal = kwargs.get('causal', False)
-            return _call_sage_attn_varlen_func(
+        elif self.attention_mode in ('sa2', 'sa3'):
+            return call_sage_attn_varlen(
                 q, k, v, cu_seqlens_q, cu_seqlens_k,
-                max_seqlen_q, max_seqlen_k,
-                is_causal=is_causal,
-                implementation=self.attention_mode
+                max_seqlen_q, max_seqlen_k, **kwargs
             )
         else:
             # PyTorch SDPA

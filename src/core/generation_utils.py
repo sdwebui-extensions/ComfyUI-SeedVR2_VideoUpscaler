@@ -318,8 +318,7 @@ def setup_generation_context(
     dit_offload_device: Optional[Union[str, torch.device]] = None,
     vae_offload_device: Optional[Union[str, torch.device]] = None,
     tensor_offload_device: Optional[Union[str, torch.device]] = None,
-    debug: Optional['Debug'] = None,
-    precision: str = 'auto'
+    debug: Optional['Debug'] = None
 ) -> Dict[str, Any]:
     """
     Initialize generation context with device configuration.
@@ -334,7 +333,6 @@ def setup_generation_context(
         vae_offload_device: Device to offload VAE to when not in use (optional)
         tensor_offload_device: Device to offload intermediate tensors to (optional)
         debug: Debug instance for logging
-        precision: Compute precision ('auto', 'fp16', 'bf16', 'bf32')
         
     Returns:
         Dict[str, Any]: Generation context dictionary with torch.device objects
@@ -367,29 +365,6 @@ def setup_generation_context(
         interrupt_fn = None
         comfyui_available = False
     
-    # Determine compute dtype based on precision request
-    if precision == 'fp16':
-        compute_dtype = torch.float16
-        reason = "user requested fp16"
-    elif precision == 'bf16':
-        compute_dtype = torch.bfloat16
-        reason = "user requested bf16"
-    elif precision == 'bf32':
-        # BF32 is usually implemented as float32 tensors with specific matmul settings (TF32)
-        # For torch dtype context, we use float32
-        compute_dtype = torch.float32
-        reason = "user requested bf32 (TF32)"
-        # Note: TF32 enablement should be handled globally or in model config
-    else:
-        # 'auto' - existing logic
-        compute_dtype = COMPUTE_DTYPE
-        if compute_dtype == torch.float32:
-            reason = "quality"
-        elif not BFLOAT16_SUPPORTED:
-            reason = "compatibility (GPU lacks bfloat16 CUBLAS - 7B models unsupported, 3B may have artifacts)"
-        else:
-            reason = "performance"
-
     # Create generation context
     ctx = {
         'dit_device': dit_device,
@@ -397,7 +372,7 @@ def setup_generation_context(
         'dit_offload_device': dit_offload_device,
         'vae_offload_device': vae_offload_device,
         'tensor_offload_device': tensor_offload_device,
-        'compute_dtype': compute_dtype,
+        'compute_dtype': COMPUTE_DTYPE,
         'interrupt_fn': interrupt_fn,
         'video_transform': None,
         'text_embeds': None,
@@ -427,6 +402,12 @@ def setup_generation_context(
             f"LOCAL_RANK={os.environ['LOCAL_RANK']}",
             category="setup"
         )
+        if ctx['compute_dtype'] == torch.float32:
+            reason = "quality"
+        elif not BFLOAT16_SUPPORTED:
+            reason = "compatibility (GPU lacks bfloat16 CUBLAS - 7B models unsupported, 3B may have artifacts)"
+        else:
+            reason = "performance"
         debug.log(f"Unified compute dtype: {ctx['compute_dtype']} across entire pipeline for maximum {reason}", category="precision")
     
     return ctx
@@ -451,7 +432,6 @@ def prepare_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
-    precision: str = 'auto',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
 ) -> Tuple['VideoDiffusionInfer', Dict[str, Any]]:
@@ -522,7 +502,6 @@ def prepare_runner(
         decode_tile_overlap=decode_tile_overlap,
         tile_debug=tile_debug,
         attention_mode=attention_mode,
-        precision=precision,
         torch_compile_args_dit=torch_compile_args_dit,
         torch_compile_args_vae=torch_compile_args_vae
     )
