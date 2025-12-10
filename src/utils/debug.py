@@ -16,16 +16,37 @@ from ..optimization.memory_manager import (
     get_ram_usage, 
     reset_vram_peak, 
     is_vram_overflow_allowed,
-    was_vram_limit_change_attempted
+    was_vram_limit_change_attempted,
+    is_mps_available,
+    is_cuda_available,
+    get_memory_architecture
 )
 from ..utils.constants import __version__
 
 
-def _format_peak_with_swap(peak_gb: float, total_vram_gb: float) -> str:
-    """Format peak memory, showing swap breakdown if overflow occurred."""
-    if total_vram_gb > 0 and peak_gb > total_vram_gb:
-        swap_gb = peak_gb - total_vram_gb
-        return f"{peak_gb:.2f}GB ({total_vram_gb:.0f}GB GPU + {swap_gb:.2f}GB swap)"
+def _format_peak_with_swap(peak_gb: float, total_vram_gb: float, arch: str = None) -> str:
+    """Format peak memory with architecture-aware overflow reporting.
+    
+    Args:
+        peak_gb: Peak reserved memory from PyTorch
+        total_vram_gb: Physical GPU VRAM capacity
+        arch: Memory architecture from get_memory_architecture(), or None to auto-detect
+    """
+    if total_vram_gb <= 0:
+        return f"{peak_gb:.2f}GB"
+    
+    overflow_gb = peak_gb - total_vram_gb
+    if overflow_gb <= 0:
+        return f"{peak_gb:.2f}GB"
+    
+    if arch is None:
+        arch = get_memory_architecture()
+    
+    if arch == 'discrete_paged':
+        return f"{peak_gb:.2f}GB ({total_vram_gb:.0f}GB GPU + {overflow_gb:.2f}GB system RAM)"
+    elif arch == 'discrete_strict':
+        return f"{peak_gb:.2f}GB (exceeded {total_vram_gb:.0f}GB by {overflow_gb:.2f}GB)"
+    # unified or cpu_only - no swap concept
     return f"{peak_gb:.2f}GB"
 
 
@@ -193,7 +214,7 @@ class Debug:
         cuda_ver = getattr(torch.version, 'cuda', None) or "N/A"
         
         # GPU
-        if torch.cuda.is_available():
+        if is_cuda_available():
             try:
                 props = torch.cuda.get_device_properties(0)
                 gpu_str = f"{props.name} ({round(props.total_memory / (1024**3))}GB)"
@@ -201,7 +222,7 @@ class Debug:
             except Exception:
                 gpu_str = "CUDA"
                 cudnn_ver = "N/A"
-        elif getattr(getattr(torch, 'mps', None), 'is_available', lambda: False)():
+        elif is_mps_available():
             gpu_str = "Apple Silicon (MPS)"
             cudnn_ver = "N/A"
         else:
@@ -236,7 +257,7 @@ class Debug:
         Returns:
             True if a forced warning was printed, False otherwise.
         """
-        is_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+        is_mps = is_mps_available()
         force = False
         
         if was_vram_limit_change_attempted():
@@ -425,10 +446,18 @@ class Debug:
         if show_diff and self.memory_checkpoints:
             self._log_memory_diff(current_metrics=memory_info, force=force)
 
-        # Warn if swap detected (peak > physical VRAM), unless user explicitly allowed overflow
-        if memory_info['vram_total'] > 0 and memory_info['vram_peak_since_last'] > memory_info['vram_total']:
-            if not is_vram_overflow_allowed():
-                self.log("VRAM swap detected - severe slowdown expected. Consider optimizing (e.g., reduce resolution, batch_size, enable BlockSwap, VAE tiling...).", 
+        # Architecture-aware overflow warnings
+        arch = memory_info.get('arch', 'cpu_only')
+        overflow = memory_info.get('vram_overflow', 0.0)
+        
+        if overflow > 0 and not is_vram_overflow_allowed():
+            if arch == 'discrete_paged':
+                self.log(f"VRAM overflow: {overflow:.2f}GB paged to system RAM - severe slowdown expected. "
+                         "Consider optimizing (e.g., reduce resolution, batch size, enable BlockSwap, VAE tiling...).",
+                         level="WARNING", category="memory", force=True)
+            elif arch == 'discrete_strict':
+                self.log(f"VRAM exceeded physical limit by {overflow:.2f}GB - OOM risk. "
+                         "Consider optimizing (e.g., reduce resolution, batch size, enable BlockSwap, VAE tiling...).",
                          level="WARNING", category="memory", force=True)
 
         # Log detailed analysis if requested
@@ -455,13 +484,17 @@ class Debug:
         reset_vram_peak(device=None, debug=self)
     
     def _collect_memory_metrics(self) -> Dict[str, Any]:
-        """Collect current memory metrics efficiently."""
+        """Collect current memory metrics with architecture-aware reporting."""
+        arch = get_memory_architecture()
+        
         metrics = {
             'vram_allocated': 0.0,
             'vram_reserved': 0.0,
             'vram_free': 0.0,
             'vram_total': 0.0,
             'vram_peak_since_last': 0.0,
+            'vram_overflow': 0.0,
+            'arch': arch,
             'ram_process': 0.0,
             'ram_available': 0.0,
             'ram_total': 0.0,
@@ -470,46 +503,43 @@ class Debug:
             'summary_ram': ""
         }
         
-        # VRAM metrics
-        if torch.cuda.is_available() or (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()):
-            metrics['vram_allocated'], metrics['vram_reserved'], current_global_peak = get_vram_usage(device=None, debug=self)
-
-            # Calculate peak since last log_memory_state
-            # This captures the actual peak that occurred between calls
-            metrics['vram_peak_since_last'] = current_global_peak
-            
+        if arch == 'cpu_only':
+            pass  # No GPU metrics
+        else:
+            metrics['vram_allocated'], metrics['vram_reserved'], metrics['vram_peak_since_last'] = get_vram_usage(device=None, debug=self)
             vram_info = get_basic_vram_info(device=None)
             
-            if "error" not in vram_info:
+            if "error" not in vram_info and vram_info["total_gb"] > 0:
                 metrics['vram_free'] = vram_info["free_gb"]
                 metrics['vram_total'] = vram_info["total_gb"]
                 
-                backend = "MPS" if (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()) else "VRAM"
-                peak_str = _format_peak_with_swap(metrics['vram_peak_since_last'], metrics['vram_total'])
-                metrics['summary_vram'] = (f"  [{backend}] {metrics['vram_allocated']:.2f}GB allocated / "
-                        f"{metrics['vram_reserved']:.2f}GB reserved / "
-                        f"Peak: {peak_str} / "
-                        f"{metrics['vram_free']:.2f}GB free / "
-                        f"{metrics['vram_total']:.2f}GB total")
-            else:
-                metrics['summary_vram'] = ""
-        else:
-            metrics['summary_vram'] = ""
+                # Calculate overflow: reserved beyond physical VRAM
+                metrics['vram_overflow'] = max(0.0, metrics['vram_peak_since_last'] - metrics['vram_total'])
+                
+                backend = "Unified Memory" if arch == 'unified' else "VRAM"
+                peak_str = _format_peak_with_swap(metrics['vram_peak_since_last'], metrics['vram_total'], arch)
+                metrics['summary_vram'] = (
+                    f"  [{backend}] {metrics['vram_allocated']:.2f}GB allocated / "
+                    f"{metrics['vram_reserved']:.2f}GB reserved / "
+                    f"Peak: {peak_str} / "
+                    f"{metrics['vram_free']:.2f}GB free / "
+                    f"{metrics['vram_total']:.2f}GB total"
+                )
         
-        # RAM metrics using new function
+        # RAM metrics
         metrics['ram_process'], metrics['ram_available'], metrics['ram_total'], metrics['ram_others'] = get_ram_usage(debug=self)
         
         if metrics['ram_total'] > 0:
-            metrics['summary_ram'] = (f"  [RAM] {metrics['ram_process']:.2f}GB process / "
-                      f"{metrics['ram_others']:.2f}GB others / "
-                      f"{metrics['ram_available']:.2f}GB free / "
-                      f"{metrics['ram_total']:.2f}GB total")
-        else:
-            metrics['summary_ram'] = ""
+            metrics['summary_ram'] = (
+                f"  [RAM] {metrics['ram_process']:.2f}GB process / "
+                f"{metrics['ram_others']:.2f}GB others / "
+                f"{metrics['ram_available']:.2f}GB free / "
+                f"{metrics['ram_total']:.2f}GB total"
+            )
         
-        # Update VRAM history for tracking
-        if torch.cuda.is_available() or (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()):
-            self.vram_history.append(metrics['vram_allocated'])
+        # Track reserved (matches nvidia-smi) for pressure history
+        if arch != 'cpu_only':
+            self.vram_history.append(metrics['vram_reserved'])
         
         return metrics
     
@@ -648,11 +678,11 @@ class Debug:
             'phase4': 'Post-processing'
         }
         
-        is_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() and not torch.cuda.is_available()
+        arch = get_memory_architecture()
         
-        # Get total VRAM for swap detection (reuse existing function)
+        # Get total VRAM for overflow detection
         total_vram_gb = 0.0
-        if not is_mps:
+        if arch not in ('unified', 'cpu_only'):
             vram_info = get_basic_vram_info(device=None)
             if "error" not in vram_info:
                 total_vram_gb = vram_info["total_gb"]
@@ -668,18 +698,18 @@ class Debug:
             vram = self.phase_vram_peaks.get(phase_key, 0)
             ram = self.phase_ram_peaks.get(phase_key, 0)
             
-            if is_mps:
-                self.log(f"  Phase {phase_num} ({phase_name}): {vram:.2f}GB", category="memory", force=force)
+            if arch == 'unified':
+                self.log(f"Phase {phase_num} ({phase_name}): {vram:.2f}GB", category="memory", indent_level=1, force=force)
             else:
-                self.log(f"  Phase {phase_num} ({phase_name}): {_format_peak_with_swap(vram, total_vram_gb)} | RAM {ram:.2f}GB", category="memory", force=force)
+                self.log(f"Phase {phase_num} ({phase_name}): {_format_peak_with_swap(vram, total_vram_gb, arch)} | RAM {ram:.2f}GB", category="memory", indent_level=1, force=force)
         
-        if is_mps:
-            overall = max(self.phase_vram_peaks.values()) if self.phase_vram_peaks else 0
-            self.log(f"Overall Peak: {overall:.2f}GB", category="memory", force=force)
+        overall_vram = max(self.phase_vram_peaks.values()) if self.phase_vram_peaks else 0
+        overall_ram = max(self.phase_ram_peaks.values()) if self.phase_ram_peaks else 0
+        
+        if arch == 'unified':
+            self.log(f"Overall peak: {overall_vram:.2f}GB", category="memory", force=force)
         else:
-            overall_vram = max(self.phase_vram_peaks.values()) if self.phase_vram_peaks else 0
-            overall_ram = max(self.phase_ram_peaks.values()) if self.phase_ram_peaks else 0
-            self.log(f"Overall peak: {_format_peak_with_swap(overall_vram, total_vram_gb)} | RAM {overall_ram:.2f}GB", category="memory", force=force)
+            self.log(f"Overall peak: {_format_peak_with_swap(overall_vram, total_vram_gb, arch)} | RAM {overall_ram:.2f}GB", category="memory", force=force)
     
     @torch._dynamo.disable  # Skip tracing to avoid time.time() warnings
     def _store_checkpoint(self, label: str, metrics: Dict[str, Any]) -> None:

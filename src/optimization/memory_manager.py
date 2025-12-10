@@ -10,6 +10,7 @@ import gc
 import sys
 import time
 import psutil
+import platform
 from typing import Tuple, Dict, Any, Optional, List, Union
     
 
@@ -17,6 +18,52 @@ def _device_str(device: Union[torch.device, str]) -> str:
     """Normalized uppercase device string for comparison and logging. MPS variants → 'MPS'."""
     s = str(device).upper()
     return 'MPS' if s.startswith('MPS') else s
+
+
+def is_mps_available() -> bool:
+    """Check if MPS (Apple Metal) backend is available."""
+    return hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+
+
+def is_cuda_available() -> bool:
+    """Check if CUDA backend is available."""
+    return torch.cuda.is_available()
+
+
+def get_gpu_backend() -> str:
+    """Get the active GPU backend type.
+    
+    Returns:
+        'cuda': NVIDIA CUDA
+        'mps': Apple Metal Performance Shaders
+        'cpu': No GPU backend available
+    """
+    if is_cuda_available():
+        return 'cuda'
+    if is_mps_available():
+        return 'mps'
+    return 'cpu'
+
+
+def get_memory_architecture() -> str:
+    """Get memory architecture type for swap/overflow detection.
+    
+    This combines GPU backend with OS platform to determine how
+    GPU memory overflow is handled:
+    
+    Returns:
+        'unified': macOS unified memory (MPS) - GPU/CPU share memory pool
+        'discrete_paged': Windows WDDM - GPU memory can page to system RAM
+        'discrete_strict': Linux - No automatic GPU paging, OOM on overflow
+        'cpu_only': No GPU backend available
+    """
+    if is_mps_available():
+        return 'unified'
+    if is_cuda_available():
+        if platform.system() == 'Windows':
+            return 'discrete_paged'
+        return 'discrete_strict'
+    return 'cpu_only'
 
 
 def get_device_list(include_none: bool = False, include_cpu: bool = False) -> List[str]:
@@ -37,14 +84,14 @@ def get_device_list(include_none: bool = False, include_cpu: bool = False) -> Li
     has_mps = False
     
     try:
-        if hasattr(torch, "cuda") and hasattr(torch.cuda, "is_available") and torch.cuda.is_available():
+        if is_cuda_available():
             devs += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
             has_cuda = True
     except Exception:
         pass
     
     try:
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        if is_mps_available():
             devs.append("mps")  # MPS doesn't use device indices
             has_mps = True
     except Exception:
@@ -66,7 +113,7 @@ def get_device_list(include_none: bool = False, include_cpu: bool = False) -> Li
     result.extend(devs)
     
     return result if result else []
-    
+
 
 def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]:
     """
@@ -80,13 +127,13 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
         dict: {"free_gb": float, "total_gb": float} or {"error": str}
     """
     try:
-        if torch.cuda.is_available():
+        if is_cuda_available():
             if device is None:
                 device = torch.device("cuda:0")
             elif not isinstance(device, torch.device):
                 device = torch.device(device)
             free_memory, total_memory = torch.cuda.mem_get_info(device)
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        elif is_mps_available():
             # MPS doesn't support per-device queries or mem_get_info
             # Use system memory as proxy
             mem = psutil.virtual_memory()
@@ -106,7 +153,7 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
 # Initial VRAM check at module load
 vram_info = get_basic_vram_info(device=None)
 if "error" not in vram_info:
-    backend = "MPS" if (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()) else "CUDA"
+    backend = "MPS" if is_mps_available() else "CUDA"
     print(f"📊 Initial {backend} memory: {vram_info['free_gb']:.2f}GB free / {vram_info['total_gb']:.2f}GB total")
 else:
     print(f"⚠️ Memory check failed: {vram_info['error']} - No available backend!")
@@ -146,7 +193,7 @@ def configure_vram_limit(allow_overflow: bool = False) -> bool:
     if allow_overflow:
         return True
     
-    if not torch.cuda.is_available():
+    if not is_cuda_available():
         return True
     
     try:
@@ -182,7 +229,7 @@ def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug
                Returns (0, 0, 0) if no GPU available
     """
     try:
-        if torch.cuda.is_available():
+        if is_cuda_available():
             if device is None:
                 device = torch.device("cuda:0")
             elif not isinstance(device, torch.device):
@@ -191,7 +238,7 @@ def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug
             reserved = torch.cuda.memory_reserved(device) / (1024**3)
             max_reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
             return allocated, reserved, max_reserved
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        elif is_mps_available():
             # MPS doesn't support per-device queries - uses global memory tracking
             allocated = torch.mps.current_allocated_memory() / (1024**3)
             reserved = torch.mps.driver_allocated_memory() / (1024**3)
@@ -291,17 +338,17 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
         # Use existing function for memory info
         mem_info = get_basic_vram_info(device=None)
         
-        if "error" not in mem_info:
+        if "error" not in mem_info and mem_info["total_gb"] > 0:
             # Check VRAM/MPS memory pressure (5% free threshold)
             free_ratio = mem_info["free_gb"] / mem_info["total_gb"]
             if free_ratio < 0.05:
                 should_clear = True
                 if debug:
-                    backend = "MPS" if (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()) else "VRAM"
+                    backend = "Unified Memory" if is_mps_available() else "VRAM"
                     debug.log(f"{backend} pressure: {mem_info['free_gb']:.2f}GB free of {mem_info['total_gb']:.2f}GB", category="memory")
         
         # For non-MPS systems, also check system RAM separately
-        if not should_clear and not (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()):
+        if not should_clear and not is_mps_available():
             mem = psutil.virtual_memory()
             if mem.available < mem.total * 0.05:
                 should_clear = True
@@ -324,10 +371,10 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
     if debug:
         debug.start_timer(gpu_timer)
     
-    if torch.cuda.is_available():
+    if is_cuda_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    elif is_mps_available():
         torch.mps.empty_cache()
     
     if debug:
@@ -364,7 +411,7 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
                 handle = _os_memory_lib.GetCurrentProcess()
                 _os_memory_lib.SetProcessWorkingSetSize(handle, -1, -1)
                 
-            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            elif is_mps_available():
                 # macOS with MPS
                 import ctypes  # Import only when needed
                 import ctypes.util
@@ -441,7 +488,7 @@ def reset_vram_peak(device: Optional[torch.device] = None, debug: Optional['Debu
     if debug and debug.enabled:
         debug.log("Resetting VRAM peak memory statistics", category="memory")
     try:
-        if torch.cuda.is_available():
+        if is_cuda_available():
             if device is None:
                 device = torch.device("cuda:0")
             elif not isinstance(device, torch.device):

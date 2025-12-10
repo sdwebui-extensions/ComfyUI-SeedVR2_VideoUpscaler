@@ -128,7 +128,7 @@ from src.core.generation_phases import (
     postprocess_all_batches
 )
 from src.utils.debug import Debug
-from src.optimization.memory_manager import clear_memory, configure_vram_limit
+from src.optimization.memory_manager import clear_memory, configure_vram_limit, get_gpu_backend, is_cuda_available
 debug = Debug(enabled=False)  # Will be enabled via --debug CLI flag
 
 # Configure VRAM limit (must be before any CUDA allocations)
@@ -138,16 +138,6 @@ if platform.system() != "Darwin":
 # =============================================================================
 # Device Management Helpers
 # =============================================================================
-
-def _get_platform_type() -> str:
-    """Determine the platform device type (cuda/mps/cpu)."""
-    if platform.system() == "Darwin":
-        return "mps"
-    elif torch.cuda.is_available():
-        return "cuda"
-    else:
-        return "cpu"
-
 
 def _device_id_to_name(device_id: str, platform_type: str = None) -> str:
     """
@@ -164,7 +154,7 @@ def _device_id_to_name(device_id: str, platform_type: str = None) -> str:
         return device_id
     
     if platform_type is None:
-        platform_type = _get_platform_type()
+        platform_type = get_gpu_backend()
     
     # MPS typically doesn't use indices
     if platform_type == "mps":
@@ -781,7 +771,7 @@ def _process_frames_core(
         Upscaled frames tensor [T', H', W', C], Float32, range [0,1]
     """    
     # Determine platform and convert device IDs to full names
-    platform_type = _get_platform_type()
+    platform_type = get_gpu_backend()
     inference_device = _device_id_to_name(device_id, platform_type)
     
     # Parse offload devices (with caching defaults)
@@ -1473,7 +1463,7 @@ def main() -> None:
     
     # Inform about caching defaults
     if args.cache_dit and args.dit_offload_device == "none":
-        offload_target = "system memory (CPU)" if _get_platform_type() != "mps" else "unified memory"
+        offload_target = "system memory (CPU)" if get_gpu_backend() != "mps" else "unified memory"
         debug.log(
             f"DiT caching enabled: Using default {offload_target} for offload. "
             "Set --dit_offload_device explicitly to use a different device.",
@@ -1481,7 +1471,7 @@ def main() -> None:
         )
     
     if args.cache_vae and args.vae_offload_device == "none":
-        offload_target = "system memory (CPU)" if _get_platform_type() != "mps" else "unified memory"
+        offload_target = "system memory (CPU)" if get_gpu_backend() != "mps" else "unified memory"
         debug.log(
             f"VAE caching enabled: Using default {offload_target} for offload. "
             "Set --vae_offload_device explicitly to use a different device.",
@@ -1494,7 +1484,7 @@ def main() -> None:
         else:
             # Show actual CUDA device visibility
             debug.log(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set (all)')}", category="device")
-            if torch.cuda.is_available():
+            if is_cuda_available():
                 debug.log(f"torch.cuda.device_count(): {torch.cuda.device_count()}", category="device")
                 debug.log(f"Using device index 0 inside script (mapped to selected GPU)", category="device")
     
