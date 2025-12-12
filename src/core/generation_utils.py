@@ -365,10 +365,6 @@ def setup_generation_context(
         interrupt_fn = None
         comfyui_available = False
     
-    # Determine compute dtype (allow override in context setup if needed, but standard flow uses COMPUTE_DTYPE)
-    # The precision selection in UI overrides this later in model_configuration.
-    compute_dtype = COMPUTE_DTYPE
-
     # Create generation context
     ctx = {
         'dit_device': dit_device,
@@ -376,7 +372,7 @@ def setup_generation_context(
         'dit_offload_device': dit_offload_device,
         'vae_offload_device': vae_offload_device,
         'tensor_offload_device': tensor_offload_device,
-        'compute_dtype': compute_dtype,
+        'compute_dtype': COMPUTE_DTYPE,
         'interrupt_fn': interrupt_fn,
         'video_transform': None,
         'text_embeds': None,
@@ -436,7 +432,6 @@ def prepare_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
-    precision: str = 'auto',
     torch_compile_args_dit: Optional[Dict[str, Any]] = None,
     torch_compile_args_vae: Optional[Dict[str, Any]] = None
 ) -> Tuple['VideoDiffusionInfer', Dict[str, Any]]:
@@ -462,7 +457,7 @@ def prepare_runner(
         decode_tile_size: Tile size for decoding (height, width)
         decode_tile_overlap: Tile overlap for decoding (height, width)
         tile_debug: Tile visualization mode (false/encode/decode)
-        attention_mode: Attention computation backend ('sdpa' or 'flash_attn')
+        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
         torch_compile_args_dit: Optional torch.compile configuration for DiT model
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
@@ -507,7 +502,6 @@ def prepare_runner(
         decode_tile_overlap=decode_tile_overlap,
         tile_debug=tile_debug,
         attention_mode=attention_mode,
-        precision=precision,
         torch_compile_args_dit=torch_compile_args_dit,
         torch_compile_args_vae=torch_compile_args_vae
     )
@@ -535,8 +529,8 @@ def load_text_embeddings(script_directory: str, device: torch.device,
         - Memory-efficient embedding preparation
         - Consistent movement logging
     """
-    text_pos_embeds = torch.load(os.path.join(script_directory, 'pos_emb.pt'))
-    text_neg_embeds = torch.load(os.path.join(script_directory, 'neg_emb.pt'))
+    text_pos_embeds = torch.load(os.path.join(script_directory, 'pos_emb.pt'), weights_only=True)
+    text_neg_embeds = torch.load(os.path.join(script_directory, 'neg_emb.pt'), weights_only=True)
     
     text_pos_embeds = manage_tensor(
         tensor=text_pos_embeds,
