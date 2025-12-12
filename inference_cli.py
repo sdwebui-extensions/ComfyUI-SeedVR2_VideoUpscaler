@@ -118,7 +118,9 @@ from src.core.generation_utils import (
     prepare_runner, 
     compute_generation_info, 
     log_generation_start,
-    blend_overlapping_frames
+    blend_overlapping_frames,
+    load_text_embeddings,
+    script_directory
 )
 from src.core.generation_phases import (
     encode_all_batches, 
@@ -857,6 +859,10 @@ def _process_frames_core(
     ctx['cache_context'] = cache_context
     if runner_cache is not None:
         runner_cache['runner'] = runner
+    
+    # Preload text embeddings before Phase 1 to avoid sync stall in Phase 2
+    ctx['text_embeds'] = load_text_embeddings(script_directory, ctx['dit_device'], ctx['compute_dtype'], debug)
+    debug.log("Loaded text embeddings for DiT", category="dit")
     
     # Compute generation info and log start (handles prepending internally)
     frames_tensor, gen_info = compute_generation_info(

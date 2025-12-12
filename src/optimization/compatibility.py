@@ -826,8 +826,11 @@ class CompatibleDiT(torch.nn.Module):
                     param.data = param.data.to(target_dtype)
                 converted_count += 1
                 
-        # Also convert buffers
+        # Also convert buffers (skip GGUF quantized buffers - they have tensor_type attribute)
         for name, buffer in self.dit_model.named_buffers():
+            # Skip GGUF quantized buffers - these must stay in packed format for on-the-fly dequantization
+            if hasattr(buffer, 'tensor_type'):
+                continue
             if buffer.dtype != target_dtype:
                 if buffer.device.type == "mps":
                     temp_cpu = buffer.data.to("cpu")

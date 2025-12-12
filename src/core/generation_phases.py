@@ -231,7 +231,11 @@ def encode_all_batches(
     if images is None:
         raise ValueError("Images to encode must be provided")
     else:
-        ctx['input_images'] = images
+        # MPS: keep on device to avoid sync overhead in Phase 4 color correction
+        if ctx['vae_device'].type == 'mps' and images.device.type != 'mps':
+            ctx['input_images'] = images.to(ctx['vae_device'])
+        else:
+            ctx['input_images'] = images
     
     # Get total frame count from context (set in video_upscaler before encoding)
     total_frames = ctx.get('total_frames', len(images))
@@ -528,6 +532,10 @@ def encode_all_batches(
         if ctx['vae_offload_device'] is not None:
             manage_model_device(model=runner.vae, target_device=ctx['vae_offload_device'], 
                                 model_name="VAE", debug=debug, reason="VAE offload", runner=runner)
+    
+    # MPS: sync to get accurate timing and free memory before Phase 2
+    if ctx['vae_device'].type == 'mps':
+        torch.mps.synchronize()
     
     debug.end_timer("phase1_encoding", "Phase 1: VAE encoding complete", show_breakdown=True)
     debug.log_memory_state("After phase 1 (VAE encoding)", show_tensors=False)
@@ -860,7 +868,13 @@ def decode_all_batches(
     
     # Pre-allocate final_video at the START of decode phase (before any batch processing)
     # This ensures we only need memory for final_video + 1 batch, not final_video + all batch_samples
-    target_device = ctx['tensor_offload_device'] if ctx['tensor_offload_device'] is not None else 'cpu'
+    # MPS: keep on device (unified memory, no benefit to CPU offload)
+    if ctx['tensor_offload_device'] is not None:
+        target_device = ctx['tensor_offload_device']
+    elif ctx['vae_device'].type == 'mps':
+        target_device = ctx['vae_device']
+    else:
+        target_device = 'cpu'
     channels_str = "RGBA" if C == 4 else "RGB"
     required_gb = (total_frames * true_h * true_w * C * 2) / (1024**3)
     debug.log(f"Pre-allocating output tensor: {total_frames} frames, {true_w}x{true_h}px, {channels_str} ({required_gb:.2f}GB)", 
@@ -1040,6 +1054,10 @@ def decode_all_batches(
         if 'all_upscaled_latents' in ctx:
             release_tensor_collection(ctx['all_upscaled_latents'])
             del ctx['all_upscaled_latents']
+    
+    # MPS: sync to get accurate timing and free memory before Phase 4
+    if ctx['vae_device'].type == 'mps':
+        torch.mps.synchronize()
         
     debug.end_timer("phase3_decoding", "Phase 3: VAE decoding complete", show_breakdown=True)
     debug.log_memory_state("After phase 3 (VAE decoding)", show_tensors=False)
