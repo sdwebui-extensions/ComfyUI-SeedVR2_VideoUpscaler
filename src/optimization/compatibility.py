@@ -8,6 +8,7 @@ Extracted from: seedvr2.py (lines 1045-1630)
 # Compatibility shims - Must run before any torch/diffusers import
 import sys
 import types
+import importlib.machinery
 
 
 def ensure_triton_compat():
@@ -44,8 +45,6 @@ def ensure_flash_attn_safe():
         import flash_attn
     except (ImportError, OSError):
         # DLL broken or not installed - create stub with proper __spec__
-        import importlib.machinery
-        
         stub = types.ModuleType('flash_attn')
         stub.__spec__ = importlib.machinery.ModuleSpec('flash_attn', None)
         stub.__file__ = None
@@ -68,69 +67,482 @@ def ensure_xformers_flash_compat():
     try:
         from xformers import _C_flashattention  # noqa: F401
     except (ImportError, OSError):
-        # DLL broken or not installed - create stub that fails gracefully
+        # DLL broken or not installed - create stub with proper __spec__
         class _FailingStub(types.ModuleType):
             """Stub that lets xformers gracefully disable its flash backend."""
             def __getattr__(self, name):
-                # Dunder attributes: raise AttributeError (normal Python behavior)
-                if name.startswith('__') and name.endswith('__'):
-                    raise AttributeError(name)
-                # xformers functional attributes: raise ImportError so xformers catches it
                 raise ImportError("_C_flashattention unavailable")
-        sys.modules['xformers._C_flashattention'] = _FailingStub('xformers._C_flashattention')
+        
+        stub = _FailingStub('xformers._C_flashattention')
+        stub.__spec__ = importlib.machinery.ModuleSpec('xformers._C_flashattention', None)
+        stub.__file__ = None
+        stub.__path__ = []
+        stub.__loader__ = None
+        sys.modules['xformers._C_flashattention'] = stub
+
+
+def ensure_bitsandbytes_safe():
+    """
+    Pre-test bitsandbytes; stub if broken to prevent import conflicts.
+    
+    On some systems (e.g., ROCm without proper binaries), bitsandbytes registers
+    PyTorch kernels during import then fails. If another node already triggered 
+    this partial load, re-importing causes kernel registration conflicts.
+    
+    This shim catches such failures and stubs the module so diffusers can load
+    gracefully without bitsandbytes quantization support.
+    """
+    if 'bitsandbytes' in sys.modules:
+        return  # Already loaded or stubbed
+    
+    try:
+        import bitsandbytes
+        # Success - bitsandbytes works, other nodes can use it
+    except (ImportError, OSError, RuntimeError):
+        # Installation broken or not present - create stub
+        stub = types.ModuleType('bitsandbytes')
+        stub.__spec__ = importlib.machinery.ModuleSpec('bitsandbytes', None)
+        stub.__file__ = None
+        stub.__path__ = []
+        stub.__version__ = "0.0.0"
+        sys.modules['bitsandbytes'] = stub
 
 
 # Run all shims immediately on import, before torch/diffusers
 ensure_triton_compat()
 ensure_flash_attn_safe()
 ensure_xformers_flash_compat()
+ensure_bitsandbytes_safe()
 
 
 import torch
 import os
 
 
-# Flash Attention & Triton Compatibility Layer
-# 1. Flash Attention - speedup for attention operations
-try:
-    from flash_attn import flash_attn_varlen_func
-    # Force load the CUDA extension to verify it's not corrupted
-    import flash_attn_2_cuda  # noqa: F401
-    FLASH_ATTN_AVAILABLE = True
-except (ImportError, AttributeError, OSError):
-    flash_attn_varlen_func = None
-    FLASH_ATTN_AVAILABLE = False
+# Flash/Sage Attention & Triton Compatibility Layer
 
-def validate_flash_attention_availability(requested_mode: str, debug=None) -> str:
+# 1. Flash Attention 3 (Hopper+, faster, no dropout/window support)
+flash_attn_3_varlen_func = None
+FLASH_ATTN_3_AVAILABLE = False
+try:
+    import flash_attn_interface
+    flash_attn_3_varlen_func = flash_attn_interface.flash_attn_varlen_func
+    FLASH_ATTN_3_AVAILABLE = True
+except (ImportError, AttributeError, OSError):
+    pass
+
+# 2. Flash Attention 2 (wider compatibility, supports dropout/window)
+flash_attn_2_varlen_func = None
+FLASH_ATTN_2_AVAILABLE = False
+try:
+    from flash_attn import flash_attn_varlen_func as _fa2_varlen
+    import flash_attn_2_cuda  # noqa: F401
+    flash_attn_2_varlen_func = _fa2_varlen
+    FLASH_ATTN_2_AVAILABLE = True
+except (ImportError, AttributeError, OSError):
+    pass
+
+FLASH_ATTN_AVAILABLE = FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE
+
+# 3. SageAttention 2 (varlen support)
+sageattn_varlen = None
+SAGE_ATTN_2_AVAILABLE = False
+try:
+    from sageattention import sageattn_varlen as _sa2_varlen
+    sageattn_varlen = _sa2_varlen
+    SAGE_ATTN_2_AVAILABLE = True
+except (ImportError, AttributeError, OSError):
+    pass
+
+# 4. SageAttention 3 / Blackwell (RTX 50xx only, batched attention)
+sageattn_blackwell = None
+SAGE_ATTN_3_AVAILABLE = False
+try:
+    from sageattn3 import sageattn3_blackwell as _sa3_blackwell
+    sageattn_blackwell = _sa3_blackwell
+    SAGE_ATTN_3_AVAILABLE = True
+except (ImportError, AttributeError, OSError):
+    try:
+        from sageattention import sageattn_blackwell as _sa3_blackwell
+        sageattn_blackwell = _sa3_blackwell
+        SAGE_ATTN_3_AVAILABLE = True
+    except (ImportError, AttributeError, OSError):
+        pass
+
+SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
+
+
+def validate_attention_mode(requested_mode: str, debug=None) -> str:
     """
-    Validate Flash Attention availability and warn if fallback needed.
+    Validate attention mode availability with automatic fallback.
     
     Args:
-        requested_mode: Either 'flash_attn' or 'sdpa'
+        requested_mode: 'sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3'
         debug: Optional debug instance for logging
         
     Returns:
-        Validated mode ('flash_attn' or 'sdpa')
+        Validated mode that is available
     """
-    if requested_mode == 'flash_attn' and not FLASH_ATTN_AVAILABLE:
+    # Flash Attention 3
+    if requested_mode == 'flash_attn_3':
+        if FLASH_ATTN_3_AVAILABLE:
+            return requested_mode
+        if FLASH_ATTN_2_AVAILABLE:
+            if debug:
+                debug.log(
+                    "Flash Attention 3 not available (requires Hopper+ GPU and flash-attn with FA3 support).\n"
+                    "Falling back to Flash Attention 2.",
+                    level="WARNING", category="setup", force=True
+                )
+            return 'flash_attn_2'
         error_msg = (
-            f"Cannot use 'flash_attn' attention mode: Flash Attention is not installed.\n"
-            f"\n"
-            f"Flash Attention provides speedup on some hardware through optimized CUDA kernels.\n"
-            f"Falling back to PyTorch SDPA (scaled dot-product attention).\n"
-            f"\n"
-            f"To fix this issue:\n"
-            f"  1. Install Flash Attention: pip install flash-attn\n"
-            f"  2. OR change attention_mode to 'sdpa' (default, always available)\n"
-            f"\n"
-            f"For more info: https://github.com/Dao-AILab/flash-attention"
+            "Cannot use 'flash_attn_3' attention mode: Flash Attention is not installed.\n"
+            "\n"
+            "Flash Attention 3 provides maximum speedup on Hopper+ GPUs through optimized CUDA kernels.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Install Flash Attention: pip install flash-attn\n"
+            "  2. OR change attention_mode to 'sdpa' (default, always available)\n"
+            "\n"
+            "For more info: https://github.com/Dao-AILab/flash-attention"
         )
         if debug:
             debug.log(error_msg, level="WARNING", category="setup", force=True)
-        
+        return 'sdpa'
+    
+    # Flash Attention 2
+    if requested_mode == 'flash_attn_2':
+        if FLASH_ATTN_2_AVAILABLE:
+            return requested_mode
+        error_msg = (
+            "Cannot use 'flash_attn_2' attention mode: Flash Attention 2 is not installed.\n"
+            "\n"
+            "Flash Attention 2 provides speedup on Ampere+ GPUs through optimized CUDA kernels.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Install Flash Attention: pip install flash-attn\n"
+            "  2. OR change attention_mode to 'sdpa' (default, always available)\n"
+            "\n"
+            "For more info: https://github.com/Dao-AILab/flash-attention"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
+        return 'sdpa'
+    
+    # SageAttention 3 (Blackwell)
+    if requested_mode == 'sageattn_3':
+        if SAGE_ATTN_3_AVAILABLE:
+            return requested_mode
+        if SAGE_ATTN_2_AVAILABLE:
+            if debug:
+                debug.log(
+                    "SageAttention 3 (Blackwell) not available (requires RTX 50xx GPU and sageattn3 package).\n"
+                    "Falling back to SageAttention 2.",
+                    level="WARNING", category="setup", force=True
+                )
+            return 'sageattn_2'
+        error_msg = (
+            "Cannot use 'sageattn_3' attention mode: SageAttention is not installed.\n"
+            "\n"
+            "SageAttention 3 provides maximum speedup on Blackwell (RTX 50xx) GPUs.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Install SageAttention: pip install sageattention\n"
+            "  2. For SA3 Blackwell support: pip install sageattn3\n"
+            "  3. OR change attention_mode to 'flash_attn_2' or 'sdpa'\n"
+            "\n"
+            "For more info: https://github.com/thu-ml/SageAttention"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
+        return 'sdpa'
+    
+    # SageAttention 2
+    if requested_mode == 'sageattn_2':
+        if SAGE_ATTN_2_AVAILABLE:
+            return requested_mode
+        error_msg = (
+            "Cannot use 'sageattn_2' attention mode: SageAttention is not installed.\n"
+            "\n"
+            "SageAttention provides speedup on NVIDIA GPUs through optimized CUDA kernels.\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
+            "\n"
+            "To fix this issue:\n"
+            "  1. Install SageAttention: pip install sageattention\n"
+            "  2. OR change attention_mode to 'flash_attn_2' or 'sdpa'\n"
+            "\n"
+            "For more info: https://github.com/thu-ml/SageAttention"
+        )
+        if debug:
+            debug.log(error_msg, level="WARNING", category="setup", force=True)
         return 'sdpa'
     
     return requested_mode
+
+
+@torch._dynamo.disable
+def call_flash_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+    """
+    Wrapper for Flash Attention 2 flash_attn_varlen_func that handles tensor-to-scalar conversion.
+    
+    Flash Attention 2 supports dropout_p and window_size parameters.
+    Works on Ampere+ GPUs (RTX 30xx, 40xx, A100, etc.).
+    
+    This function is excluded from torch.compile because:
+    1. flash_attn is a C++ extension that can't be compiled anyway
+    2. It requires Python int scalars for max_seqlen parameters
+    3. Disabling compilation here keeps the rest of the model compilable
+    
+    Args:
+        q: Query tensor (total_seq, heads, head_dim)
+        k: Key tensor (total_seq, heads, head_dim)
+        v: Value tensor (total_seq, heads, head_dim)
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_k: Cumulative sequence lengths for keys
+        max_seqlen_q: Maximum query sequence length (can be tensor or int)
+        max_seqlen_k: Maximum key sequence length (can be tensor or int)
+        **kwargs: Additional arguments (dropout_p, softmax_scale, causal, window_size, deterministic)
+        
+    Returns:
+        Attention output tensor (total_seq, heads, head_dim)
+    """
+    if not FLASH_ATTN_2_AVAILABLE:
+        raise ImportError("Flash Attention 2 is not available")
+    
+    # Convert tensor max_seqlen to Python int if needed
+    if torch.is_tensor(max_seqlen_q):
+        max_seqlen_q = int(max_seqlen_q.item())
+    if torch.is_tensor(max_seqlen_k):
+        max_seqlen_k = int(max_seqlen_k.item())
+    
+    return flash_attn_2_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        **kwargs
+    )
+
+
+@torch._dynamo.disable
+def call_flash_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+    """
+    Wrapper for Flash Attention 3 flash_attn_varlen_func that handles tensor-to-scalar conversion.
+    
+    Flash Attention 3 is faster than FA2 but does NOT support dropout_p and window_size.
+    Works on Hopper+ GPUs (H100, etc.) - requires flash_attn_interface package.
+    
+    This function is excluded from torch.compile because:
+    1. flash_attn is a C++ extension that can't be compiled anyway
+    2. It requires Python int scalars for max_seqlen parameters
+    3. Disabling compilation here keeps the rest of the model compilable
+    
+    Args:
+        q: Query tensor (total_seq, heads, head_dim)
+        k: Key tensor (total_seq, heads, head_dim)
+        v: Value tensor (total_seq, heads, head_dim)
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_k: Cumulative sequence lengths for keys
+        max_seqlen_q: Maximum query sequence length (can be tensor or int)
+        max_seqlen_k: Maximum key sequence length (can be tensor or int)
+        **kwargs: Additional arguments (softmax_scale, causal, deterministic)
+                  Note: dropout_p and window_size are ignored (not supported by FA3)
+        
+    Returns:
+        Attention output tensor (total_seq, heads, head_dim)
+    """
+    if not FLASH_ATTN_3_AVAILABLE:
+        raise ImportError("Flash Attention 3 is not available")
+    
+    # Convert tensor max_seqlen to Python int if needed
+    if torch.is_tensor(max_seqlen_q):
+        max_seqlen_q = int(max_seqlen_q.item())
+    if torch.is_tensor(max_seqlen_k):
+        max_seqlen_k = int(max_seqlen_k.item())
+    
+    # FA3 doesn't support dropout_p and window_size - filter them out
+    fa3_kwargs = {key: val for key, val in kwargs.items() if key not in ('dropout_p', 'window_size')}
+    
+    # FA3 returns a tuple (output, softmax_lse), we only need output
+    return flash_attn_3_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_q=None,
+        seqused_k=None,
+        **fa3_kwargs
+    )[0]
+
+
+@torch._dynamo.disable
+def call_sage_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+    """
+    Wrapper for SageAttention 2 sageattn_varlen that handles tensor-to-scalar conversion.
+    
+    SageAttention 2 provides optimized attention for NVIDIA GPUs with native varlen support.
+    Works on most modern NVIDIA GPUs.
+    
+    This function is excluded from torch.compile because:
+    1. SageAttention is a C++ extension that can't be compiled anyway
+    2. It requires Python int scalars for max_seqlen parameters
+    3. Disabling compilation here keeps the rest of the model compilable
+    
+    Args:
+        q: Query tensor (total_seq, heads, head_dim)
+        k: Key tensor (total_seq, heads, head_dim)
+        v: Value tensor (total_seq, heads, head_dim)
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_k: Cumulative sequence lengths for keys
+        max_seqlen_q: Maximum query sequence length (can be tensor or int)
+        max_seqlen_k: Maximum key sequence length (can be tensor or int)
+        **kwargs: Additional arguments (causal supported, others ignored)
+        
+    Returns:
+        Attention output tensor (total_seq, heads, head_dim)
+    """
+    if not SAGE_ATTN_2_AVAILABLE:
+        raise ImportError("SageAttention 2 is not available")
+    
+    # Convert tensor max_seqlen to Python int if needed
+    if torch.is_tensor(max_seqlen_q):
+        max_seqlen_q = int(max_seqlen_q.item())
+    if torch.is_tensor(max_seqlen_k):
+        max_seqlen_k = int(max_seqlen_k.item())
+    
+    # SageAttention requires half precision (fp16/bf16)
+    out_dtype = q.dtype
+    half_dtypes = (torch.float16, torch.bfloat16)
+    
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+    
+    if q.dtype not in half_dtypes:
+        q = q.to(torch.bfloat16)
+        k = k.to(torch.bfloat16)
+        v = v.to(torch.bfloat16)
+    
+    is_causal = kwargs.get('causal', False)
+    sm_scale = 1.0 / (q.shape[-1] ** 0.5)
+    
+    out = sageattn_varlen(
+        q, k, v,
+        cu_seqlens_q, cu_seqlens_k,
+        max_seqlen_q, max_seqlen_k,
+        is_causal, sm_scale
+    )
+    
+    return out.to(out_dtype) if out.dtype != out_dtype else out
+
+
+@torch._dynamo.disable
+def call_sage_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+    """
+    Wrapper for SageAttention 3 (Blackwell) that converts varlen format to batched format.
+    
+    SageAttention 3 / Blackwell provides maximum performance on RTX 50xx series GPUs.
+    However, it only supports batched attention (uniform sequence lengths), not varlen.
+    
+    This wrapper detects uniform-length batches and reshapes accordingly.
+    For variable-length sequences, it automatically falls back to SageAttention 2.
+    
+    This function is excluded from torch.compile because:
+    1. SageAttention is a C++ extension that can't be compiled anyway
+    2. It requires Python int scalars for max_seqlen parameters
+    3. The varlen-to-batched conversion involves dynamic shapes
+    4. Disabling compilation here keeps the rest of the model compilable
+    
+    Args:
+        q: Query tensor (total_seq, heads, head_dim)
+        k: Key tensor (total_seq, heads, head_dim)
+        v: Value tensor (total_seq, heads, head_dim)
+        cu_seqlens_q: Cumulative sequence lengths for queries
+        cu_seqlens_k: Cumulative sequence lengths for keys
+        max_seqlen_q: Maximum query sequence length (can be tensor or int)
+        max_seqlen_k: Maximum key sequence length (can be tensor or int)
+        **kwargs: Additional arguments (passed to SA2 fallback if needed)
+        
+    Returns:
+        Attention output tensor (total_seq, heads, head_dim)
+    """
+    if not SAGE_ATTN_3_AVAILABLE:
+        raise ImportError("SageAttention 3 (Blackwell) is not available")
+    
+    # Convert tensor max_seqlen to Python int if needed
+    if torch.is_tensor(max_seqlen_q):
+        max_seqlen_q = int(max_seqlen_q.item())
+    if torch.is_tensor(max_seqlen_k):
+        max_seqlen_k = int(max_seqlen_k.item())
+    
+    # Check if all sequences have uniform length (required for SA3 batched API)
+    # SA3/Blackwell uses batched attention, not varlen, so we need uniform lengths
+    seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    seq_lens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+    
+    uniform_q = (seq_lens_q == seq_lens_q[0]).all()
+    uniform_k = (seq_lens_k == seq_lens_k[0]).all()
+    
+    if not (uniform_q and uniform_k):
+        # Fall back to SA2 for variable-length sequences
+        # This is expected behavior - SA3 Blackwell doesn't support varlen natively
+        if SAGE_ATTN_2_AVAILABLE:
+            return call_sage_attn_2_varlen(
+                q, k, v, cu_seqlens_q, cu_seqlens_k,
+                max_seqlen_q, max_seqlen_k, **kwargs
+            )
+        raise RuntimeError(
+            "SageAttention 3 (Blackwell) requires uniform sequence lengths, "
+            "and SageAttention 2 is not available as fallback. "
+            "Please install sageattention package or use flash_attn/sdpa instead."
+        )
+    
+    # Extract batch dimensions
+    batch_size = len(cu_seqlens_q) - 1
+    seq_len_q = int(seq_lens_q[0].item())
+    seq_len_k = int(seq_lens_k[0].item())
+    heads = q.shape[1]
+    dim = q.shape[2]
+    
+    # SageAttention requires half precision (fp16/bf16)
+    out_dtype = q.dtype
+    half_dtypes = (torch.float16, torch.bfloat16)
+    
+    if not (q.dtype == k.dtype == v.dtype):
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+    
+    if q.dtype not in half_dtypes:
+        q = q.to(torch.bfloat16)
+        k = k.to(torch.bfloat16)
+        v = v.to(torch.bfloat16)
+    
+    # Reshape varlen (total_seq, heads, dim) -> batched (batch, seq, heads, dim)
+    q_batched = q.view(batch_size, seq_len_q, heads, dim)
+    k_batched = k.view(batch_size, seq_len_k, heads, dim)
+    v_batched = v.view(batch_size, seq_len_k, heads, dim)
+    
+    # SA3/Blackwell expects (batch, heads, seq, dim) layout
+    q_batched = q_batched.transpose(1, 2)  # (batch, heads, seq, dim)
+    k_batched = k_batched.transpose(1, 2)
+    v_batched = v_batched.transpose(1, 2)
+    
+    # Call SA3 Blackwell
+    out = sageattn_blackwell(q_batched, k_batched, v_batched, per_block_mean=False)
+    
+    # Reshape back to varlen format (total_seq, heads, dim)
+    out = out.transpose(1, 2).reshape(-1, heads, dim).contiguous()
+    
+    return out.to(out_dtype) if out.dtype != out_dtype else out
 
 
 # 2. Triton - Required for torch.compile with inductor backend
@@ -231,21 +643,34 @@ NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = _check_conv3d_memory_bug()
 if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
     os.environ["SEEDVR2_OPTIMIZATIONS_LOGGED"] = "1"
     
-    # Flash Attention & Triton status
-    has_both = FLASH_ATTN_AVAILABLE and TRITON_AVAILABLE
-    has_neither = not FLASH_ATTN_AVAILABLE and not TRITON_AVAILABLE
+    # Build status strings
+    sage_status = "✅" if SAGE_ATTN_AVAILABLE else "❌"
+    flash_status = "✅" if FLASH_ATTN_AVAILABLE else "❌"
+    triton_status = "✅" if TRITON_AVAILABLE else "❌"
     
-    if has_both:
-        print("⚡ SeedVR2 optimizations check: Flash Attention ✅ | Triton ✅")
-    elif has_neither:
-        print("⚠️  SeedVR2 optimizations check: Flash Attention ❌ | Triton ❌")
-        print("💡 For best performance: pip install flash-attn triton")
-    elif FLASH_ATTN_AVAILABLE:
-        print("⚡ SeedVR2 optimizations check: Flash Attention ✅ | Triton ❌")
-        print("💡 Install Triton for torch.compile: pip install triton")
-    else:  # TRITON_AVAILABLE only
-        print("⚠️  SeedVR2 optimizations check: Flash Attention ❌ | Triton ✅")
-        print("💡 Install Flash Attention for faster inference: pip install flash-attn")
+    # Count available optimizations
+    available = [SAGE_ATTN_AVAILABLE, FLASH_ATTN_AVAILABLE, TRITON_AVAILABLE]
+    num_available = sum(available)
+    
+    if num_available == 3:
+        print(f"⚡ SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
+    elif num_available == 0:
+        print(f"⚠️  SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
+        print("💡 For best performance: pip install sageattention flash-attn triton")
+    else:
+        icon = "⚡" if num_available >= 2 else "⚠️ "
+        print(f"{icon} SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
+        
+        # Build install suggestions for missing packages
+        missing = []
+        if not SAGE_ATTN_AVAILABLE:
+            missing.append("sageattention")
+        if not FLASH_ATTN_AVAILABLE:
+            missing.append("flash-attn")
+        if not TRITON_AVAILABLE:
+            missing.append("triton")
+        if missing:
+            print(f"💡 Optional: pip install {' '.join(missing)}")
     
     # Conv3d workaround status (if applicable)
     if NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND:
@@ -276,29 +701,33 @@ def call_rope_with_stability(method, *args, **kwargs):
     """
     Call RoPE method with stability fixes:
     1. Clear cache if available
-    2. Disable autocast to prevent numerical issues
+    2. Disable autocast to prevent numerical issues (CUDA only)
     This prevents artifacts in FP8/mixed precision models.
     """
     if hasattr(method, 'cache_clear'):
         method.cache_clear()
     
-    with torch.cuda.amp.autocast(enabled=False):
+    # Only use CUDA autocast context on CUDA devices
+    # MPS has no CUDA autocast to disable
+    if torch.cuda.is_available():
+        with torch.cuda.amp.autocast(enabled=False):
+            return method(*args, **kwargs)
+    else:
         return method(*args, **kwargs)
     
     
-class FP8CompatibleDiT(torch.nn.Module):
+class CompatibleDiT(torch.nn.Module):
     """
     Wrapper for DiT models with automatic compatibility management + advanced optimizations
     
     Precision Handling:
     - FP8: Keeps native FP8 parameters (memory efficient), converts inputs/outputs to compute_dtype for arithmetic
-    - FP16: Uses native FP16 precision throughout
-    - BFloat16: Uses native BFloat16 precision throughout
-    - Float32: Uses full precision for maximum quality
+    - FP16/BFloat16/Float32: Uses native precision throughout
+    - GGUF: On-the-fly dequantization to compute_dtype
+    - MPS: Forces all parameters to compute_dtype (unified memory requires dtype consistency)
     - RoPE: Converted from FP8 to compute_dtype for numerical consistency
     
     Optimizations:
-    - Flash Attention: Automatic optimization of attention layers
     - RoPE Stabilization: Error handling for numerical stability in mixed precision
     - MPS Compatibility: Unified dtype conversion for Apple Silicon backends
     """
@@ -321,9 +750,12 @@ class FP8CompatibleDiT(torch.nn.Module):
             self.debug.start_timer("_convert_rope_freqs")
             self._convert_rope_freqs(target_dtype=self.compute_dtype)
             self.debug.end_timer("_convert_rope_freqs", "RoPE freqs conversion")
-            
-            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                self.debug.log(f"Also converting NaDiT parameters/buffers for MPS backend", category="setup", force=True)
+        
+        # MPS requires unified dtype for all parameters/buffers (no autocast fallback)
+        # Apply to ALL model types (FP8, FP16, GGUF) when dtype differs from compute_dtype
+        if not skip_conversion and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            if self.model_dtype != self.compute_dtype:
+                self.debug.log(f"Converting NaDiT parameters/buffers to {self.compute_dtype} for MPS backend", category="setup", force=True)
                 self.debug.start_timer("_force_nadit_precision")
                 self._force_nadit_precision(target_dtype=self.compute_dtype)
                 self.debug.end_timer("_force_nadit_precision", "NaDiT parameters/buffers conversion")
