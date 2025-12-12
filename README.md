@@ -36,6 +36,13 @@ We're actively working on improvements and new features. To stay informed:
 
 ## 🚀 Release Notes
 
+**2025.12.12 - Version 2.5.21**
+
+- **🛠️ Fix: GGUF dequantization error on MPS** - Resolved shape mismatch error introduced in 2.5.20 by skipping GGUF quantized buffers in precision conversion - these must remain in packed format for on-the-fly dequantization during inference
+- **🍎 MPS: Eliminate CPU sync overhead** - Skip unnecessary CPU tensor offload on Apple Silicon unified memory architecture, preventing sync stalls that caused slowdowns. Input images and output video now stay on MPS device throughout the pipeline
+- **⚡ MPS: Preload text embeddings** - Load text embeddings before Phase 1 encoding to avoid sync stall at Phase 2 start, improving timing accuracy and throughput
+- **🧹 MPS: Optimized model cleanup** - Skip redundant CPU movement before model deletion on unified memory
+
 **2025.12.12 - Version 2.5.20**
 
 - **⚡ Expanded attention backends** - Full support for Flash Attention 2 (Ampere+), Flash Attention 3 (Hopper+), SageAttention 2, and SageAttention 3 (Blackwell/RTX 50xx), with automatic fallback chains to PyTorch SDPA when unavailable *(based on PR by [@naxci1](https://github.com/naxci1) - thank you!)*
