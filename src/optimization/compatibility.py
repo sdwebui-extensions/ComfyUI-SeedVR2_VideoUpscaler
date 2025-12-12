@@ -81,10 +81,38 @@ def ensure_xformers_flash_compat():
         sys.modules['xformers._C_flashattention'] = stub
 
 
+def ensure_bitsandbytes_safe():
+    """
+    Pre-test bitsandbytes; stub if broken to prevent import conflicts.
+    
+    On some systems (e.g., ROCm without proper binaries), bitsandbytes registers
+    PyTorch kernels during import then fails. If another node already triggered 
+    this partial load, re-importing causes kernel registration conflicts.
+    
+    This shim catches such failures and stubs the module so diffusers can load
+    gracefully without bitsandbytes quantization support.
+    """
+    if 'bitsandbytes' in sys.modules:
+        return  # Already loaded or stubbed
+    
+    try:
+        import bitsandbytes
+        # Success - bitsandbytes works, other nodes can use it
+    except (ImportError, OSError, RuntimeError):
+        # Installation broken or not present - create stub
+        stub = types.ModuleType('bitsandbytes')
+        stub.__spec__ = importlib.machinery.ModuleSpec('bitsandbytes', None)
+        stub.__file__ = None
+        stub.__path__ = []
+        stub.__version__ = "0.0.0"
+        sys.modules['bitsandbytes'] = stub
+
+
 # Run all shims immediately on import, before torch/diffusers
 ensure_triton_compat()
 ensure_flash_attn_safe()
 ensure_xformers_flash_compat()
+ensure_bitsandbytes_safe()
 
 
 import torch
