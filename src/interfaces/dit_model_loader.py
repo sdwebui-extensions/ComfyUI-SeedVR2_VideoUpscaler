@@ -66,7 +66,8 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                         "• 3B model: 0-32 blocks\n"
                         "• 7B model: 0-36 blocks\n"
                         "\n"
-                        "Requires offload_device to be set and different from device."
+                        "Requires offload_device to be set and different from device.\n"
+                        "Not available on macOS (unified memory architecture)."
                     )
                 ),
                 io.Boolean.Input("swap_io_components",
@@ -74,7 +75,8 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
                     optional=True,
                     tooltip=(
                         "Offload input/output embeddings and normalization layers to reduce VRAM.\n"
-                        "Requires offload_device to be set and different from device."
+                        "Requires offload_device to be set and different from device.\n"
+                        "Not available on macOS (unified memory architecture)."
                     )
                 ),
                 io.Combo.Input("offload_device",
@@ -152,16 +154,8 @@ class SeedVR2LoadDiTModel(io.ComfyNode):
             NodeOutput containing configuration dictionary for SeedVR2 main node
             
         Raises:
-            ValueError: If BlockSwap is enabled but offload_device is invalid
+            ValueError: If cache_model is enabled but offload_device is not set
         """
-        # Validate BlockSwap configuration
-        if (blocks_to_swap > 0 or swap_io_components) and (offload_device == "none" or offload_device == device):
-            raise ValueError(
-                "BlockSwap requires offload_device to be set and different from device. "
-                f"Current: device='{device}', offload_device='{offload_device}'. "
-                "Please set offload_device to a different device (e.g., 'cpu' or another GPU)."
-            )
-        
         # Validate cache_model configuration
         if cache_model and offload_device == "none":
             raise ValueError(

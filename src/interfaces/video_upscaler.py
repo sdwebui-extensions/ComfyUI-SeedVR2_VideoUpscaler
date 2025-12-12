@@ -349,13 +349,12 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
 
         block_swap_config = None
         if blocks_to_swap > 0 or swap_io_components:
-            # Convert offload device string to torch.device for BlockSwap
+            block_swap_config = {
+                "blocks_to_swap": blocks_to_swap,
+                "swap_io_components": swap_io_components,
+            }
             if dit_offload_str != "none":
-                block_swap_config = {
-                    "blocks_to_swap": blocks_to_swap,
-                    "swap_io_components": swap_io_components,
-                    "offload_device": torch.device(dit_offload_str)
-                }
+                block_swap_config["offload_device"] = torch.device(dit_offload_str)
 
         # Device configuration for offloading - convert "none" to None, else torch.device
         vae_offload_str = vae.get("offload_device", "none")

@@ -74,7 +74,7 @@ from ..optimization.compatibility import (
     TRITON_AVAILABLE,
     validate_attention_mode
 )
-from ..optimization.blockswap import is_blockswap_enabled, apply_block_swap_to_dit, cleanup_blockswap
+from ..optimization.blockswap import is_blockswap_enabled, validate_blockswap_config, apply_block_swap_to_dit, cleanup_blockswap
 from ..optimization.memory_manager import cleanup_dit, cleanup_vae
 from ..utils.constants import find_model_file
 
@@ -794,6 +794,14 @@ def configure_runner(
     
     if debug is None:
         raise ValueError("Debug instance must be provided to configure_runner")
+    
+    # Validate BlockSwap configuration early (before any model loading)
+    block_swap_config = validate_blockswap_config(
+        block_swap_config=block_swap_config,
+        dit_device=ctx['dit_device'],
+        dit_offload_device=ctx.get('dit_offload_device'),
+        debug=debug
+    )
     
     # Phase 1: Initialize cache and get cached models
     cache_context = _initialize_cache_context(
