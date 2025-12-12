@@ -8,8 +8,7 @@ authors = [
 ]
 license = {file = "LICENSE"} 
 classifiers = [
-     "Operating System :: OS Independent",
-     "Environment :: GPU :: NVIDIA CUDA"
+     "Operating System :: OS Independent"
 ]
 dependencies = [
     "torch",
