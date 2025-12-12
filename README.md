@@ -36,6 +36,15 @@ We're actively working on improvements and new features. To stay informed:
 
 ## 🚀 Release Notes
 
+**2025.12.12 - Version 2.5.20**
+
+- **⚡ Expanded attention backends** - Full support for Flash Attention 2 (Ampere+), Flash Attention 3 (Hopper+), SageAttention 2, and SageAttention 3 (Blackwell/RTX 50xx), with automatic fallback chains to PyTorch SDPA when unavailable *(based on PR by [@naxci1](https://github.com/naxci1) - thank you!)*
+- **🍎 macOS/Apple Silicon compatibility** - Replaced MPS autocast with explicit dtype conversion throughout VAE and DiT pipelines, resolving hangs and crashes on M-series Macs. BlockSwap now auto-disables with warning (unified memory makes it meaningless)
+- **🛡️ Flash Attention graceful fallback** - Added compatibility shims for corrupted or partially installed flash_attn/xformers DLLs, preventing startup crashes
+- **🛡️ AMD ROCm: bitsandbytes conflict fix** - Prevent kernel registration errors when diffusers attempts to re-import broken bitsandbytes installations
+- **📦 ComfyUI Manager: macOS classifier fix** - Removed NVIDIA CUDA classifier causing false "GPU not supported" warnings on macOS
+- **📚 Documentation updates** - Updated README with attention backend details, BlockSwap macOS notes, and clarified model caching descriptions
+
 **2025.12.10 - Version 2.5.19**
 
 - **🎨 New header logo design** - Refreshed ASCII art banner *(thanks [@naxci1](https://github.com/naxci1))*
