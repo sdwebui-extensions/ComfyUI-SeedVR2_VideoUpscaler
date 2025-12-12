@@ -197,7 +197,7 @@ def apply_block_swap_to_dit(
     
     debug.start_timer("apply_blockswap")
 
-    # Get the actual model (handle FP8CompatibleDiT wrapper)
+    # Get the actual model (handle CompatibleDiT wrapper)
     model = runner.dit
     if hasattr(model, "dit_model"):
         model = model.dit_model
@@ -795,7 +795,7 @@ def set_blockswap_bypass(runner, bypass: bool, debug):
     if not hasattr(runner, "_blockswap_active") or not runner._blockswap_active:
         return
     
-    # Get the actual model (handle FP8CompatibleDiT wrapper)
+    # Get the actual model (handle CompatibleDiT wrapper)
     model = runner.dit
     if hasattr(model, "dit_model"):
         model = model.dit_model
@@ -830,7 +830,7 @@ def cleanup_blockswap(runner, keep_state_for_cache=False):
     
     debug = runner.debug
     
-    # Get the actual model (handle FP8CompatibleDiT wrapper)
+    # Get the actual model (handle CompatibleDiT wrapper)
     model = runner.dit
     if hasattr(model, "dit_model"):
         model = model.dit_model
@@ -858,7 +858,7 @@ def cleanup_blockswap(runner, keep_state_for_cache=False):
         return
 
     # Full cleanup when not caching
-    # Get the actual model (handle FP8CompatibleDiT wrapper)
+    # Get the actual model (handle CompatibleDiT wrapper)
     model = runner.dit
     if hasattr(model, "dit_model"):
         model = model.dit_model

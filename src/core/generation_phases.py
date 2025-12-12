@@ -700,7 +700,7 @@ def upscale_all_batches(
             )
             conditions = [condition]
             
-            # Detect DiT model dtype (handle FP8CompatibleDiT wrapper)
+            # Detect DiT model dtype (handle CompatibleDiT wrapper)
             dit_model = runner.dit.dit_model if hasattr(runner.dit, 'dit_model') else runner.dit
             try:
                 dit_dtype = next(dit_model.parameters()).dtype
@@ -708,9 +708,10 @@ def upscale_all_batches(
                 dit_dtype = ctx['compute_dtype']  # Fallback for meta device or empty model
             
             # Use autocast if DiT dtype differs from compute dtype
+            # Skip autocast on MPS (CompatibleDiT already handles dtype conversion)
             debug.start_timer(f"dit_inference_{upscale_idx+1}")
             with torch.no_grad():
-                if dit_dtype != ctx['compute_dtype']:
+                if dit_dtype != ctx['compute_dtype'] and ctx['dit_device'].type != 'mps':
                     with torch.autocast(ctx['dit_device'].type, ctx['compute_dtype'], enabled=True):
                         upscaled_latents = runner.inference(
                             noises=noises,

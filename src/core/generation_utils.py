@@ -529,8 +529,8 @@ def load_text_embeddings(script_directory: str, device: torch.device,
         - Memory-efficient embedding preparation
         - Consistent movement logging
     """
-    text_pos_embeds = torch.load(os.path.join(script_directory, 'pos_emb.pt'))
-    text_neg_embeds = torch.load(os.path.join(script_directory, 'neg_emb.pt'))
+    text_pos_embeds = torch.load(os.path.join(script_directory, 'pos_emb.pt'), weights_only=True)
+    text_neg_embeds = torch.load(os.path.join(script_directory, 'neg_emb.pt'), weights_only=True)
     
     text_pos_embeds = manage_tensor(
         tensor=text_pos_embeds,

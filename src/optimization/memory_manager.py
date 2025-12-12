@@ -702,7 +702,7 @@ def manage_model_device(model: torch.nn.Module, target_device: torch.device, mod
         
         if has_blockswap_config:
             is_blockswap_model = True
-            # Get the actual model (handle FP8CompatibleDiT wrapper)
+            # Get the actual model (handle CompatibleDiT wrapper)
             if hasattr(model, "dit_model"):
                 actual_model = model.dit_model
 

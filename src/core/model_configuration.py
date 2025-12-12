@@ -70,7 +70,7 @@ from .model_cache import get_global_cache
 from ..common.config import load_config
 from ..models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 from ..optimization.compatibility import (
-    FP8CompatibleDiT,
+    CompatibleDiT,
     TRITON_AVAILABLE,
     validate_attention_mode
 )
@@ -1176,16 +1176,16 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
     """
     if is_dit:
         # DiT-specific
-        # Apply FP8 compatibility wrapper with compute_dtype
-        if not isinstance(model, FP8CompatibleDiT):
-            debug.log("Applying FP8/RoPE compatibility wrapper to DiT model", category="setup")
-            debug.start_timer("FP8CompatibleDiT")
+        # Apply compatibility wrapper with compute_dtype
+        if not isinstance(model, CompatibleDiT):
+            debug.log("Applying DiT compatibility wrapper", category="setup")
+            debug.start_timer("CompatibleDiT")
             # Get compute_dtype from runner if available, fallback to bfloat16
             compute_dtype = getattr(runner, '_compute_dtype', torch.bfloat16)
-            model = FP8CompatibleDiT(model, debug, compute_dtype=compute_dtype, skip_conversion=False)
-            debug.end_timer("FP8CompatibleDiT", "FP8/RoPE compatibility wrapper application")
+            model = CompatibleDiT(model, debug, compute_dtype=compute_dtype, skip_conversion=False)
+            debug.end_timer("CompatibleDiT", "Compatibility wrapper application")
         else:
-            debug.log("Reusing existing FP8/RoPE compatibility wrapper", category="reuse")
+            debug.log("Reusing existing DiT compatibility wrapper", category="reuse")
         
         # Apply attention mode and compute_dtype to all FlashAttentionVarlen modules
         if hasattr(runner, '_dit_attention_mode'):

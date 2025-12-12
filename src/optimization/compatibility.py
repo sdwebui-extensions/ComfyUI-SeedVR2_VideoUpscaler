@@ -673,29 +673,33 @@ def call_rope_with_stability(method, *args, **kwargs):
     """
     Call RoPE method with stability fixes:
     1. Clear cache if available
-    2. Disable autocast to prevent numerical issues
+    2. Disable autocast to prevent numerical issues (CUDA only)
     This prevents artifacts in FP8/mixed precision models.
     """
     if hasattr(method, 'cache_clear'):
         method.cache_clear()
     
-    with torch.cuda.amp.autocast(enabled=False):
+    # Only use CUDA autocast context on CUDA devices
+    # MPS has no CUDA autocast to disable
+    if torch.cuda.is_available():
+        with torch.cuda.amp.autocast(enabled=False):
+            return method(*args, **kwargs)
+    else:
         return method(*args, **kwargs)
     
     
-class FP8CompatibleDiT(torch.nn.Module):
+class CompatibleDiT(torch.nn.Module):
     """
     Wrapper for DiT models with automatic compatibility management + advanced optimizations
     
     Precision Handling:
     - FP8: Keeps native FP8 parameters (memory efficient), converts inputs/outputs to compute_dtype for arithmetic
-    - FP16: Uses native FP16 precision throughout
-    - BFloat16: Uses native BFloat16 precision throughout
-    - Float32: Uses full precision for maximum quality
+    - FP16/BFloat16/Float32: Uses native precision throughout
+    - GGUF: On-the-fly dequantization to compute_dtype
+    - MPS: Forces all parameters to compute_dtype (unified memory requires dtype consistency)
     - RoPE: Converted from FP8 to compute_dtype for numerical consistency
     
     Optimizations:
-    - Flash Attention: Automatic optimization of attention layers
     - RoPE Stabilization: Error handling for numerical stability in mixed precision
     - MPS Compatibility: Unified dtype conversion for Apple Silicon backends
     """
@@ -718,9 +722,12 @@ class FP8CompatibleDiT(torch.nn.Module):
             self.debug.start_timer("_convert_rope_freqs")
             self._convert_rope_freqs(target_dtype=self.compute_dtype)
             self.debug.end_timer("_convert_rope_freqs", "RoPE freqs conversion")
-            
-            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                self.debug.log(f"Also converting NaDiT parameters/buffers for MPS backend", category="setup", force=True)
+        
+        # MPS requires unified dtype for all parameters/buffers (no autocast fallback)
+        # Apply to ALL model types (FP8, FP16, GGUF) when dtype differs from compute_dtype
+        if not skip_conversion and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            if self.model_dtype != self.compute_dtype:
+                self.debug.log(f"Converting NaDiT parameters/buffers to {self.compute_dtype} for MPS backend", category="setup", force=True)
                 self.debug.start_timer("_force_nadit_precision")
                 self._force_nadit_precision(target_dtype=self.compute_dtype)
                 self.debug.end_timer("_force_nadit_precision", "NaDiT parameters/buffers conversion")
