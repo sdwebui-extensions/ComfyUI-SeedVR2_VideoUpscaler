@@ -164,9 +164,6 @@ class FFMPEGVideoWriter:
     """
     
     def __init__(self, path: str, width: int, height: int, fps: float, use_10bit: bool = False):
-        if shutil.which("ffmpeg") is None:
-            raise RuntimeError("ffmpeg not found in PATH. Install ffmpeg or use --video_backend opencv")
-        
         pix_fmt = 'yuv420p10le' if use_10bit else 'yuv420p'
         codec = 'libx265' if use_10bit else 'libx264'
         
@@ -1515,6 +1512,12 @@ def main() -> None:
     
     if args.vae_decode_tiled and args.vae_decode_tile_overlap >= args.vae_decode_tile_size:
         debug.log(f"VAE decode tile overlap ({args.vae_decode_tile_overlap}) must be smaller than tile size ({args.vae_decode_tile_size})", level="ERROR", category="vae", force=True)
+        sys.exit(1)
+    
+    # Validate ffmpeg availability if selected
+    if args.video_backend == "ffmpeg" and shutil.which("ffmpeg") is None:
+        debug.log("--video_backend ffmpeg requires ffmpeg in PATH. Install ffmpeg or use --video_backend opencv", 
+                 level="ERROR", category="setup", force=True)
         sys.exit(1)
     
     # Inform about caching defaults
