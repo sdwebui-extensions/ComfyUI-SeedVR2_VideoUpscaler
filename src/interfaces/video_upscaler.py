@@ -19,7 +19,9 @@ from ..core.generation_utils import (
     setup_generation_context, 
     prepare_runner,
     compute_generation_info,
-    log_generation_start
+    log_generation_start,
+    load_text_embeddings,
+    script_directory
 )
 from ..optimization.memory_manager import (
     cleanup_text_embeddings,
@@ -436,6 +438,10 @@ class SeedVR2VideoUpscaler(io.ComfyNode):
 
             # Store cache context in ctx for use in generation phases
             ctx['cache_context'] = cache_context
+
+            # Preload text embeddings before Phase 1 to avoid sync stall in Phase 2
+            ctx['text_embeds'] = load_text_embeddings(script_directory, ctx['dit_device'], ctx['compute_dtype'], debug)
+            debug.log("Loaded text embeddings for DiT", category="dit")
 
             debug.log_memory_state("After model preparation", show_tensors=False, detailed_tensors=False)
             debug.end_timer("model_preparation", "Model preparation", force=True, show_breakdown=True)

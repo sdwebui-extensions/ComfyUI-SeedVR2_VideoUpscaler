@@ -350,7 +350,12 @@ def setup_generation_context(
     vae_device = _normalize_device(vae_device)
     dit_offload_device = _normalize_device(dit_offload_device) if dit_offload_device is not None else None
     vae_offload_device = _normalize_device(vae_offload_device) if vae_offload_device is not None else None
-    tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
+    # MPS unified memory: CPU offload causes sync overhead with no memory benefit
+    is_mps = dit_device.type == 'mps' or vae_device.type == 'mps'
+    if is_mps and tensor_offload_device is not None and str(tensor_offload_device) == 'cpu':
+        tensor_offload_device = None
+    else:
+        tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
     
     # Set LOCAL_RANK to 0 for single-GPU inference mode
     # CLI multi-GPU uses CUDA_VISIBLE_DEVICES to restrict visibility per worker
