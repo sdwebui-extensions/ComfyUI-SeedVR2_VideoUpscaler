@@ -812,14 +812,16 @@ python inference_cli.py image.jpg
 # Basic video upscaling with temporal consistency
 python inference_cli.py video.mp4 --resolution 720 --batch_size 33
 
-# Streaming mode for long videos (memory-efficient)
+# Streaming mode for long videos (memory-efficient) with 10-bit video output (requires FFMPEG)
 # Processes video in chunks of 330 frames to avoid loading entire video into RAM
 # Use --temporal_overlap to ensure smooth transitions between chunks
 python inference_cli.py long_video.mp4 \
     --resolution 1080 \
     --batch_size 33 \
     --chunk_size 330 \
-    --temporal_overlap 3
+    --temporal_overlap 3 \
+    --video_backend ffmpeg \
+    --10bit
 
 # Multi-GPU processing with temporal overlap
 python inference_cli.py video.mp4 \
@@ -866,6 +868,8 @@ python inference_cli.py media_folder/ \
 - `<input>`: Input file (.mp4, .avi, .png, .jpg, etc.) or directory
 - `--output`: Output path (default: auto-generated in 'output/' directory)
 - `--output_format`: Output format: 'mp4' (video) or 'png' (image sequence). Default: auto-detect from input type
+- `--video_backend`: Video encoder backend: 'opencv' (default) or 'ffmpeg' (requires ffmpeg in PATH)
+- `--10bit`: Save 10-bit video with x265 codec and yuv420p10le pixel format (reduces banding in gradients). Without this flag, ffmpeg uses x264 (yuv420p) for maximum compatibility. Requires --video_backend ffmpeg
 - `--model_dir`: Model directory (default: ./models/SEEDVR2)
 
 **Model Selection:**

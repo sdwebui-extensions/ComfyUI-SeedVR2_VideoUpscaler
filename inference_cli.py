@@ -109,6 +109,7 @@ import torch
 import cv2
 import numpy as np
 import subprocess
+import shutil
 
 # Project imports
 from src.utils.downloads import download_weight
@@ -132,6 +133,66 @@ from src.core.generation_phases import (
 from src.utils.debug import Debug
 from src.optimization.memory_manager import clear_memory, get_gpu_backend, is_cuda_available
 debug = Debug(enabled=False)  # Will be enabled via --debug CLI flag
+
+
+# =============================================================================
+# FFMPEG Class
+# =============================================================================
+
+class FFMPEGVideoWriter:
+    """
+    Video writer using ffmpeg subprocess for encoding with 10-bit support.
+    
+    Provides cv2.VideoWriter-compatible interface (write, isOpened, release) while
+    using ffmpeg for encoding. Enables 10-bit output (yuv420p10le with x265) which
+    reduces banding artifacts in gradients compared to 8-bit opencv output.
+    
+    Args:
+        path: Output video file path
+        width: Frame width in pixels
+        height: Frame height in pixels
+        fps: Frames per second
+        use_10bit: If True, uses x265 codec with yuv420p10le pixel format.
+                   If False, uses x264 with yuv420p (default: False)
+    
+    Raises:
+        RuntimeError: If ffmpeg is not found in system PATH
+    
+    Note:
+        Frames must be passed to write() in BGR format (same as cv2.VideoWriter).
+        Internally converts to RGB for ffmpeg rawvideo input.
+    """
+    
+    def __init__(self, path: str, width: int, height: int, fps: float, use_10bit: bool = False):
+        if shutil.which("ffmpeg") is None:
+            raise RuntimeError("ffmpeg not found in PATH. Install ffmpeg or use --video_backend opencv")
+        
+        pix_fmt = 'yuv420p10le' if use_10bit else 'yuv420p'
+        codec = 'libx265' if use_10bit else 'libx264'
+        
+        self.proc = subprocess.Popen(
+            ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
+             '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
+             '-c:v', codec, '-pix_fmt', pix_fmt, '-preset', 'medium', '-crf', '12', path],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+    
+    def write(self, frame_bgr: np.ndarray):
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        self.proc.stdin.write(frame_rgb.astype(np.uint8).tobytes())
+    
+    def isOpened(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+    
+    def release(self):
+        if self.proc:
+            self.proc.stdin.close()
+            self.proc.wait()
+            stderr = self.proc.stderr.read() if self.proc.stderr else b''
+            if self.proc.returncode != 0:
+                debug.log(f"ffmpeg error: {stderr.decode()}", level="WARNING", category="file")
+            self.proc = None
+
 
 # =============================================================================
 # Device Management Helpers
@@ -448,7 +509,8 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
             if is_png:
                 save_frames_to_image(result, output_path, base_name)
             else:
-                video_writer = save_frames_to_video(result, output_path, fps, args=args)
+                video_writer = save_frames_to_video(result, output_path, fps, 
+                    video_backend=args.video_backend, use_10bit=args.use_10bit)
                 if video_writer is not None:
                     video_writer.release()
             
@@ -476,7 +538,8 @@ def process_single_file(input_path: str, args: argparse.Namespace, device_list: 
                 if is_png:
                     save_frames_to_image(result, output_path, base_name, start_index=frames_written)
                 else:
-                    video_writer = save_frames_to_video(result, output_path, fps, writer=video_writer, args=args)
+                    video_writer = save_frames_to_video(result, output_path, fps, writer=video_writer,
+                        video_backend=args.video_backend, use_10bit=args.use_10bit)
                 
                 frames_written += result.shape[0]
                 del result
@@ -660,7 +723,8 @@ def save_frames_to_video(
     output_path: str, 
     fps: float = 30.0,
     writer: Optional[cv2.VideoWriter] = None,
-    args: Optional[argparse.Namespace] = None
+    video_backend: str = "opencv",
+    use_10bit: bool = False
 ) -> Optional[cv2.VideoWriter]:
     """
     Save frames tensor to MP4 video file.
@@ -683,99 +747,25 @@ def save_frames_to_video(
     """
     frames_np = (frames_tensor.cpu().numpy() * 255.0).astype(np.uint8)
     T, H, W, C = frames_np.shape
-
-    # Default backend if not specified
-    backend = 'opencv' if args is None else getattr(args, 'video_backend', 'opencv')
-    save_10bit = False if args is None else getattr(args, 'save_10bit', False)
-
-    class _FFMPEGWriter:
-        def __init__(self, path: str, w: int, h: int, fps: float, save_10bit: bool):
-            self.path = path
-            self.w = w
-            self.h = h
-            self.fps = fps
-            self.save_10bit = save_10bit
-            self.proc = None
-            self._open()
-
-        def _open(self):
-            os.makedirs(Path(self.path).parent, exist_ok=True)
-            pix_out = 'yuv420p10le' if self.save_10bit else 'yuv420p'
-            # Use x265 for 10-bit output, x264 otherwise
-            if self.save_10bit:
-                codec = 'libx265'
-            else:
-                codec = 'libx264'
-
-            cmd = [
-                'ffmpeg', '-y',
-                '-f', 'rawvideo',
-                '-pix_fmt', 'rgb24',
-                '-s', f'{self.w}x{self.h}',
-                '-r', str(self.fps),
-                '-i', '-',
-                '-c:v', codec,
-                '-pix_fmt', pix_out,
-                '-preset', 'medium',
-                '-crf', '12',
-                self.path
-            ]
-
-            # Start ffmpeg process
-            self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        def write(self, frame_rgb: np.ndarray):
-            # Frame expected as RGB uint8 array HxWx3
-            if self.proc is None or self.proc.stdin is None:
-                raise ValueError('FFmpeg process not started')
-            # Ensure RGB24 (drop alpha if present)
-            if frame_rgb.shape[2] == 4:
-                frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGBA2RGB)
-            if frame_rgb.dtype != np.uint8:
-                frame_rgb = frame_rgb.astype(np.uint8)
-            self.proc.stdin.write(frame_rgb.tobytes())
-
-        def release(self):
-            if self.proc is not None:
-                try:
-                    if self.proc.stdin:
-                        self.proc.stdin.close()
-                except Exception:
-                    pass
-                self.proc.wait()
-                self.proc = None
-
-    # Open appropriate writer
+    
     if writer is None:
-        debug.log(f"Saving {T} frames to video: {output_path} (backend={backend})", category="file")
-        if backend == 'opencv':
-            os.makedirs(Path(output_path).parent, exist_ok=True)
+        debug.log(f"Saving {T} frames to video: {output_path} (backend={video_backend})", category="file")
+        os.makedirs(Path(output_path).parent, exist_ok=True)
+        if video_backend == "ffmpeg":
+            writer = FFMPEGVideoWriter(output_path, W, H, fps, use_10bit)
+        else:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             writer = cv2.VideoWriter(output_path, fourcc, fps, (W, H))
-            if not writer.isOpened():
-                raise ValueError(f"Cannot create video writer for: {output_path}")
-        else:
-            writer = _FFMPEGWriter(output_path, W, H, fps, save_10bit)
-
-    # Write frames
+        if not writer.isOpened():
+            raise ValueError(f"Cannot create video writer for: {output_path}")
+    
     for i, frame in enumerate(frames_np):
-        # frame is RGB uint8
-        if C == 4:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
-        else:
-            frame_rgb = frame
-
-        if backend == 'opencv':
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            writer.write(frame_bgr)
-        else:
-            # FFmpeg writer expects RGB bytes
-            writer.write(frame_rgb)
-
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        writer.write(frame_bgr)
         if debug.enabled and (i + 1) % 100 == 0:
             debug.log(f"Written {i + 1}/{T} frames", category="file")
-
-    return writer  # Caller must call .release() for either writer type
+    
+    return writer  # Caller always closes
 
 
 def save_frames_to_image(
@@ -1315,8 +1305,8 @@ Examples:
   Basic video upscaling with temporal consistency:
     python {invocation} video.mp4 --resolution 720 --batch_size 33
     
-  Streaming mode for long videos:
-    python {invocation} long_video.mp4 --resolution 1080 --batch_size 33 --chunk_size 330 --temporal_overlap 3
+  Streaming mode for long videos with 10-bit video output (requires FFMPEG):
+    python {invocation} long_video.mp4 --resolution 1080 --batch_size 33 --chunk_size 330 --temporal_overlap 3 --video_backend ffmpeg --10bit
 
   Multi-GPU processing with temporal overlap:
     python {invocation} video.mp4 --cuda_device 0,1 --resolution 1080 --batch_size 81 --uniform_batch_size --temporal_overlap 3 --prepend_frames 4 
@@ -1329,7 +1319,6 @@ Examples:
     
   Batch directory processing:
     python {invocation} media_folder/ --output processed/ --cuda_device 0 --cache_dit --cache_vae --dit_offload_device cpu --vae_offload_device cpu --resolution 1080 --max_resolution 1920
-
 """
     
     parser = argparse.ArgumentParser(
@@ -1348,9 +1337,10 @@ Examples:
     io_group.add_argument("--output_format", type=str, default=None, choices=["mp4", "png", None],
                         help="Output format: 'mp4' (video) or 'png' (image sequence). Default: auto-detect from input type")
     io_group.add_argument("--video_backend", type=str, default="opencv", choices=["opencv", "ffmpeg"],
-                        help="Video backend for encoding: 'opencv' (default) or 'ffmpeg' (requires ffmpeg in PATH).")
-    io_group.add_argument("--save_10bit", action="store_true",
-                        help="When using --video_backend ffmpeg, save output as 10-bit (yuv420p10le with libx265).")
+                        help="Video encoder backend: 'opencv' (default) or 'ffmpeg' (requires ffmpeg in PATH)")
+    io_group.add_argument("--10bit", dest="use_10bit", action="store_true",
+                        help="Save 10-bit video with x265 codec (reduces banding). Without this flag, "
+                         "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")
     io_group.add_argument("--model_dir", type=str, default=None,
                         help=f"Model directory (default: ./models/{SEEDVR2_FOLDER_NAME})")
     
