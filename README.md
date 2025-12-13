@@ -36,6 +36,13 @@ We're actively working on improvements and new features. To stay informed:
 
 ## 🚀 Release Notes
 
+**2025.12.13 - Version 2.5.22**
+
+- **🎬 CLI: FFmpeg video backend with 10-bit support** - New `--video_backend ffmpeg` and `--10bit` flags enable x265 encoding with 10-bit color depth, reducing banding artifacts in gradients compared to 8-bit OpenCV output *(based on PR by [@thehhmdb](https://github.com/thehhmdb) - thank you!)*
+- **🍎 Fix: MPS bicubic upscaling compatibility** - Added CPU fallback for bicubic+antialias interpolation on PyTorch versions before 2.8.0, resolving RGBA alpha upscaling errors on Apple Silicon
+- **⚡ Fix: Cross-platform histogram matching** - Replaced scatter_ operation with argsort+index_select for improved reliability across CUDA, ROCm, and MPS backends
+- **🧹 MPS: Remove sync overhead** - Reverted unnecessary `torch.mps.synchronize()` calls introduced in v2.5.21 for consistent behavior with CUDA pipeline
+
 **2025.12.12 - Version 2.5.21**
 
 - **🛠️ Fix: GGUF dequantization error on MPS** - Resolved shape mismatch error introduced in 2.5.20 by skipping GGUF quantized buffers in precision conversion - these must remain in packed format for on-the-fly dequantization during inference

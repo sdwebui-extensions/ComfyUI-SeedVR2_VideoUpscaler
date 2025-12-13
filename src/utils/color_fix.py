@@ -506,15 +506,15 @@ def _histogram_matching_channel(source: Tensor, reference: Tensor, device: torch
         matched_sorted = reference_sorted[ref_indices]
         del source_quantiles, ref_indices, reference_sorted
     
-    del source_sorted
+    del source_sorted, source_flat
     
-    # Reconstruct using index_select with out param (portable, memory-efficient)
+    # Reconstruct using argsort (portable across CUDA/ROCm/MPS)
     inverse_indices = torch.argsort(source_indices)
     del source_indices
-    torch.index_select(matched_sorted, 0, inverse_indices, out=source_flat)
+    matched_flat = matched_sorted[inverse_indices]
     del matched_sorted, inverse_indices
     
-    return source_flat.reshape(original_shape)
+    return matched_flat.reshape(original_shape)
 
 
 def hsv_saturation_histogram_match(content_feat: Tensor, style_feat: Tensor, debug: Optional['Debug'] = None) -> Tensor:
@@ -756,11 +756,10 @@ def _histogram_match_1d(source: Tensor, reference: Tensor, device: torch.device)
     
     del source_sorted
     
-    # Reconstruct using index_select with out param (portable, memory-efficient)
-    matched = torch.empty_like(source)
+    # Reconstruct using argsort (portable across CUDA/ROCm/MPS)
     inverse_indices = torch.argsort(source_indices)
     del source_indices
-    torch.index_select(matched_sorted, 0, inverse_indices, out=matched)
+    matched = matched_sorted[inverse_indices]
     del matched_sorted, inverse_indices
     
     return matched
