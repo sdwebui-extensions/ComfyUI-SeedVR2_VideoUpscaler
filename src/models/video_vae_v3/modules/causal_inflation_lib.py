@@ -91,6 +91,36 @@ class InflatedCausalConv3d(Conv3d):
         Workaround: Call torch.cudnn_convolution directly to bypass buggy layer.
         Status is logged at startup in compatibility.py.
         """
+        # Optimization: Use fast 2D conv for spatial-only operations (no temporal mixing)
+        # Check: kernel_time=1, stride_time=1, dilation_time=1, padding_time=0
+        if (
+            self.kernel_size[0] == 1
+            and self.stride[0] == 1
+            and self.dilation[0] == 1
+            and self.padding[0] == 0
+        ):
+            # Reshape input: (B, C, T, H, W) -> (B*T, C, H, W)
+            B, C, T, H, W = input.shape
+            input_2d = input.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
+
+            # Reshape weight: (Out, In, 1, kH, kW) -> (Out, In, kH, kW)
+            weight_2d = weight.squeeze(2)
+
+            # Conv2D params
+            stride_2d = self.stride[1:]
+            padding_2d = self.padding[1:]
+            dilation_2d = self.dilation[1:]
+
+            # Execute standard Conv2d
+            out_2d = F.conv2d(
+                input_2d, weight_2d, bias, stride_2d, padding_2d, dilation_2d, self.groups
+            )
+
+            # Reshape output back: (B*T, Out, H', W') -> (B, Out, T, H', W')
+            _, C_out, H_out, W_out = out_2d.shape
+            out = out_2d.view(B, T, C_out, H_out, W_out).permute(0, 2, 1, 3, 4)
+            return out
+
         if (NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND and 
             weight.dtype in (torch.float16, torch.bfloat16) and 
             hasattr(torch.backends.cudnn, 'is_available') and
