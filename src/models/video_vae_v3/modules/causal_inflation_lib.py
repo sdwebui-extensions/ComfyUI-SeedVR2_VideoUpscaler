@@ -308,9 +308,6 @@ class InflatedCausalConv3d(Conv3d):
         )
         return output
 
-            return self.basic_forward(input, memory_state)
-        return self.slicing_forward(input, memory_state)
-
     def basic_forward(self, input: Tensor, memory_state: MemoryState = MemoryState.UNSET):
         mem_size = self.stride[0] - self.kernel_size[0]
         if (self.memory is not None) and (memory_state == MemoryState.ACTIVE):
