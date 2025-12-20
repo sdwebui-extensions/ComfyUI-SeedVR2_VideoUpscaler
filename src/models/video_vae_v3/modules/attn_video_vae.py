@@ -51,7 +51,7 @@ from .types import (
     _memory_device_t,
     _receptive_field_t,
 )
-from ....optimization.memory_manager import retry_on_oom
+from ....optimization.memory_manager import is_mps_available, retry_on_oom
 
 logger = get_logger(__name__)  # pylint: disable=invalid-name
 
@@ -1224,6 +1224,9 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         
         output = causal_conv_gather_outputs(output)
         
+        if is_mps_available():
+            torch.mps.empty_cache()
+
         # Only transfer back if needed
         return output if output.device == x.device else output.to(x.device)
 
@@ -1240,6 +1243,9 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         output = self.decoder(_z, memory_state=memory_state)
         output = causal_conv_gather_outputs(output)
         
+        if is_mps_available():
+            torch.mps.empty_cache()
+
         # Only transfer back if needed
         return output if output.device == z.device else output.to(z.device)
 
