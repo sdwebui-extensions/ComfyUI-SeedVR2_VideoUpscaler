@@ -592,11 +592,11 @@ def validate_gguf_availability(operation: str = "load GGUF model", debug=None) -
         raise RuntimeError(f"GGUF library required to {operation}")
 
 
-# 4. NVIDIA Conv3d Memory Bug - Workaround for PyTorch 2.9-2.10 + cuDNN >= 91002
+# 4. NVIDIA Conv3d Memory Bug - Workaround for PyTorch >= 2.9 + cuDNN >= 91002
 def _check_conv3d_memory_bug():
     """
     Check if Conv3d memory bug workaround needed.
-    Bug: PyTorch 2.9-2.10 with cuDNN >= 91002 uses 3x memory for Conv3d 
+    Bug: PyTorch 2.9+ with cuDNN >= 91002 uses 3x memory for Conv3d 
     with fp16/bfloat16 due to buggy dispatch layer.
     """
     try:
@@ -622,7 +622,8 @@ def _check_conv3d_memory_bug():
         parts = version_str.split('.')
         torch_version = tuple(int(p) for p in parts[:2])
         
-        if not ((2, 9) <= torch_version <= (2, 10)):
+        # Bug affects PyTorch 2.9 and later versions
+        if torch_version < (2, 9):
             return False
         
         if not hasattr(torch.backends.cudnn, 'version'):

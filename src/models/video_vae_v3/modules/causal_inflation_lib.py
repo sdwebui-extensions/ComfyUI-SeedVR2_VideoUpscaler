@@ -85,7 +85,7 @@ class InflatedCausalConv3d(Conv3d):
         """
         Override _conv_forward to work around NVIDIA Conv3d memory bug.
         
-        Bug: PyTorch 2.9-2.10 with cuDNN >= 91002 uses 3x memory for Conv3d 
+        Bug: PyTorch 2.9+ with cuDNN >= 91002 uses 3x memory for Conv3d 
         with fp16/bfloat16 weights due to buggy dispatch layer.
         
         Workaround: Call torch.cudnn_convolution directly to bypass buggy layer.
