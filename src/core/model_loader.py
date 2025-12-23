@@ -146,7 +146,7 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
                     handle_prefix="model.diffusion_model."
                 )
     elif checkpoint_path.endswith('.pth'):
-        state = torch.load(checkpoint_path, map_location=device_str, mmap=True)
+        state = torch.load(checkpoint_path, map_location=device_str, mmap=True, weights_only=True)
     else:
         raise ValueError(f"Unsupported checkpoint format. Expected .safetensors or .pth, got: {checkpoint_path}")
     
