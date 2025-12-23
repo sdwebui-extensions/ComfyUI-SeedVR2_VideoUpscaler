@@ -109,6 +109,7 @@ import torch
 import cv2
 import numpy as np
 import subprocess
+import threading
 import shutil
 
 # Project imports
@@ -173,22 +174,68 @@ class FFMPEGVideoWriter:
              '-c:v', codec, '-pix_fmt', pix_fmt, '-preset', 'medium', '-crf', '12', path],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
         )
+        # Background reader to continuously consume stderr so ffmpeg cannot block
+        self._stderr_buffer = bytearray()
+        self._stderr_thread = threading.Thread(target=self._read_stderr, daemon=True)
+        self._stderr_thread.start()
     
     def write(self, frame_bgr: np.ndarray):
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        self.proc.stdin.write(frame_rgb.astype(np.uint8).tobytes())
+        if not self.isOpened():
+            raise RuntimeError("ffmpeg process is not running")
+
+        try:
+            self.proc.stdin.write(frame_rgb.astype(np.uint8).tobytes())
+            # ensure data is flushed to the subprocess pipe
+            self.proc.stdin.flush()
+        except BrokenPipeError:
+            stderr = bytes(self._stderr_buffer).decode(errors='replace')
+            raise RuntimeError(f"ffmpeg process closed (BrokenPipe). Stderr:\n{stderr}")
     
     def isOpened(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
     
     def release(self):
         if self.proc:
-            self.proc.stdin.close()
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+
+            # Wait for process to exit and for stderr thread to finish
             self.proc.wait()
-            stderr = self.proc.stderr.read() if self.proc.stderr else b''
+            try:
+                self._stderr_thread.join(timeout=1.0)
+            except Exception:
+                pass
+
+            # Merge any remaining stderr
+            remaining = b''
+            try:
+                if self.proc.stderr:
+                    remaining = self.proc.stderr.read() or b''
+            except Exception:
+                remaining = b''
+
+            stderr = bytes(self._stderr_buffer) + remaining
             if self.proc.returncode != 0:
-                debug.log(f"ffmpeg error: {stderr.decode()}", level="WARNING", category="file")
+                debug.log(f"ffmpeg error: {stderr.decode(errors='replace')}", level="WARNING", category="file")
+
             self.proc = None
+
+    def _read_stderr(self):
+        # Continuously read stderr in small chunks to avoid filling the pipe buffer
+        try:
+            if not self.proc or not self.proc.stderr:
+                return
+            while True:
+                chunk = self.proc.stderr.read(1024)
+                if not chunk:
+                    break
+                self._stderr_buffer.extend(chunk)
+        except Exception:
+            # Ignore read errors - best effort only
+            return
 
 
 # =============================================================================
