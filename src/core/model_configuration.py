@@ -1317,26 +1317,23 @@ def _configure_torch_compile(compile_args: Dict[str, Any], model_type: str,
     # Check Triton availability for inductor backend BEFORE attempting compilation
     if settings['backend'] == 'inductor':
         if not TRITON_AVAILABLE:
-            warn_msg = (
+            error_msg = (
                 f"Cannot use torch.compile with 'inductor' backend: Triton is not installed.\n"
-                f"Automatically falling back to 'cudagraphs' backend if available, or disabling compilation.\n"
-                f"For best performance, install Triton: pip install triton"
+                f"\n"
+                f"Triton is required for the inductor backend which performs kernel fusion and optimization.\n"
+                f"\n"
+                f"To fix this issue:\n"
+                f"  1. Install Triton: pip install triton\n"
+                f"  2. OR change backend to 'cudagraphs' (lightweight, no Triton needed)\n"
+                f"  3. OR disable torch.compile\n"
+                f"\n"
+                f"For more info: https://github.com/triton-lang/triton"
             )
-            debug.log(warn_msg, level="WARNING", category="setup", force=True)
-
-            # Check if cudagraphs is available as fallback
-            try:
-                import torch
-                # Simple check - if we can't use inductor, try to see if we can use cudagraphs
-                # But typically cudagraphs is built-in.
-                # Let's switch to cudagraphs and see.
-                settings['backend'] = 'cudagraphs'
-                debug.log("Switched backend to 'cudagraphs' due to missing Triton", category="setup", force=True)
-            except Exception:
-                debug.log("Could not switch to cudagraphs, disabling compilation", level="WARNING", category="setup")
-                raise RuntimeError("Triton missing and fallback failed") # Should be caught by caller if we wanted to
-
-            # If we switched, we don't raise RuntimeError anymore.
+            debug.log(error_msg, level="ERROR", category="setup", force=True)
+            raise RuntimeError(
+                "torch.compile with inductor backend requires Triton. "
+                "Install with: pip install triton"
+            )
     
     # Log compilation configuration
     debug.log(f"Configuring torch.compile for {model_type}...", category="setup", force=True)

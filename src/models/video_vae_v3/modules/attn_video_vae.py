@@ -313,7 +313,14 @@ class ResnetBlock3D(ResnetBlock2D):
     ):
         hidden_states = input_tensor
 
-        # Handle upsample/downsample first (usually involves 5D operations if temporal)
+        hidden_states = causal_norm_wrapper(self.norm1, hidden_states)
+        hidden_states = retry_on_oom(
+            self.nonlinearity,
+            hidden_states,
+            debug=getattr(self, 'debug', None),
+            operation_name="ResnetBlock3D.nonlinearity"
+        )
+
         if self.upsample is not None:
             # upsample_nearest_nhwc fails with large batch sizes.
             # see https://github.com/huggingface/diffusers/issues/984
@@ -325,78 +332,6 @@ class ResnetBlock3D(ResnetBlock2D):
         elif self.downsample is not None:
             input_tensor = self.downsample(input_tensor, memory_state=memory_state)
             hidden_states = self.downsample(hidden_states, memory_state=memory_state)
-
-        # Check if we can run the main ResNet path in 4D (flattened temporal)
-        # Conditions:
-        # 1. Input is 5D (B, C, T, H, W)
-        # 2. conv1 and conv2 are effectively 2D (spatial only)
-        # 3. conv_shortcut (if present) is effectively 2D
-        # 4. time_embedding_norm is "default" (simple add) - others might need more complex broadcasting logic in 4D
-
-        can_run_4d = (
-            hidden_states.ndim == 5
-            and self.conv1.check_effective_2d()
-            and self.conv2.check_effective_2d()
-            and (self.conv_shortcut is None or self.conv_shortcut.check_effective_2d())
-            and (self.time_embedding_norm == "default" or temb is None)
-        )
-
-        if can_run_4d:
-            B, C, T, H, W = hidden_states.shape
-
-            # Reshape to 4D: (B*T, C, H, W)
-            # Use contiguous to ensure efficient memory layout for conv2d
-            hidden_states = hidden_states.transpose(1, 2).reshape(B * T, C, H, W).contiguous()
-            if input_tensor.ndim == 5:
-                input_tensor = input_tensor.transpose(1, 2).reshape(B * T, C, H, W).contiguous()
-
-            # Prepare temb for 4D
-            temb_4d = None
-            if self.time_emb_proj is not None and temb is not None:
-                if not self.skip_time_act:
-                    temb = self.nonlinearity(temb)
-                # temb: (B, C_emb) -> proj -> (B, C_out) -> (B, C_out, 1, 1)
-                # We need (B*T, C_out, 1, 1)
-                temb_proj = self.time_emb_proj(temb)[:, :, None, None]
-                # Expand B to B*T
-                temb_4d = temb_proj.repeat_interleave(T, dim=0)
-
-            # Main path in 4D
-            # causal_norm_wrapper handles 4D input by just calling GroupNorm (no rearrange overhead!)
-            hidden_states = causal_norm_wrapper(self.norm1, hidden_states)
-            hidden_states = self.nonlinearity(hidden_states)
-
-            # InflatedCausalConv3d handles 4D input by dispatching to conv2d (cached check)
-            hidden_states = self.conv1(hidden_states, memory_state=memory_state)
-
-            if temb_4d is not None and self.time_embedding_norm == "default":
-                hidden_states = hidden_states + temb_4d
-
-            hidden_states = causal_norm_wrapper(self.norm2, hidden_states)
-            hidden_states = self.nonlinearity(hidden_states)
-            hidden_states = self.dropout(hidden_states)
-            hidden_states = self.conv2(hidden_states, memory_state=memory_state)
-
-            if self.conv_shortcut is not None:
-                input_tensor = self.conv_shortcut(input_tensor, memory_state=memory_state)
-
-            output_tensor = (input_tensor + hidden_states) / self.output_scale_factor
-
-            # Reshape back to 5D: (B, C, T, H, W)
-            # Output is (B*T, C, H, W)
-            _, C_out, H_out, W_out = output_tensor.shape
-            output_tensor = output_tensor.view(B, T, C_out, H_out, W_out).transpose(1, 2)
-
-            return output_tensor
-
-        # Fallback to standard 5D path
-        hidden_states = causal_norm_wrapper(self.norm1, hidden_states)
-        hidden_states = retry_on_oom(
-            self.nonlinearity,
-            hidden_states,
-            debug=getattr(self, 'debug', None),
-            operation_name="ResnetBlock3D.nonlinearity"
-        )
 
         hidden_states = self.conv1(hidden_states, memory_state=memory_state)
 
@@ -1143,7 +1078,7 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         norm_num_groups: int = 32,
         sample_size: int = 32,
         scaling_factor: float = 0.18215,
-        force_upcast: float = False,
+        force_upcast: float = True,
         attention: bool = True,
         temporal_scale_num: int = 2,
         slicing_up_num: int = 0,
@@ -1289,10 +1224,6 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         
         output = causal_conv_gather_outputs(output)
         
-        # MPS memory leak workaround (pytorch/pytorch#155060)
-        if self.device.type == 'mps':
-            torch.mps.empty_cache()
-
         # Only transfer back if needed
         return output if output.device == x.device else output.to(x.device)
 
@@ -1309,10 +1240,6 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         output = self.decoder(_z, memory_state=memory_state)
         output = causal_conv_gather_outputs(output)
         
-        # MPS memory leak workaround (pytorch/pytorch#155060)
-        if self.device.type == 'mps':
-            torch.mps.empty_cache()
-
         # Only transfer back if needed
         return output if output.device == z.device else output.to(z.device)
 

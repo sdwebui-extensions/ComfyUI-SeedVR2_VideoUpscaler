@@ -81,114 +81,16 @@ class InflatedCausalConv3d(Conv3d):
     def set_memory_device(self, memory_device: _memory_device_t):
         self.memory_device = memory_device
     
-    def check_effective_2d(self):
-        """
-        Check if the convolution is effectively 2D (spatial only) AND compatible with 2D optimization path.
-        Returns True if:
-        1. Temporal kernel size is 1 OR weights are tail-inflated (only last temporal slice is non-zero).
-        2. AND stride[0] == 1.
-        3. AND dilation[0] == 1.
-        4. AND padding[0] == 0 (self.padding is modified in __init__, this checks the spatial-only padding).
-        """
-        if hasattr(self, '_effective_2d'):
-            return self._effective_2d
-
-        # Check stride, dilation, padding first (fast checks)
-        if not (self.stride[0] == 1 and self.dilation[0] == 1 and self.padding[0] == 0):
-            self._effective_2d = False
-            return False
-
-        if self.kernel_size[0] == 1:
-            self._effective_2d = True
-            return True
-
-        # Check for tail inflation (all zeros except last slice in temporal dim)
-        # Weight shape: (Out, In, T, H, W)
-        with torch.no_grad():
-            # Check if all slices except the last one are zero
-            # Use a small threshold for float comparison or exact check for initialized weights
-            if torch.sum(torch.abs(self.weight[:, :, :-1, :, :])) < 1e-6:
-                self._effective_2d = True
-                return True
-
-        self._effective_2d = False
-        return False
-
-    def forward(
-        self,
-        input: Union[Tensor, List[Tensor]],
-        memory_state: MemoryState = MemoryState.UNSET
-    ) -> Tensor:
-        assert memory_state != MemoryState.UNSET
-        if memory_state != MemoryState.ACTIVE:
-            self.memory = None
-
-        # Handle 4D input directly (optimization for spatial-only blocks)
-        if torch.is_tensor(input) and input.ndim == 4:
-            # If 4D input is passed, we MUST be in the "effective 2D" path.
-            # Skip extend_head and memory logic, go straight to conv.
-            # _conv_forward handles the actual 2D dispatch.
-            return super().forward(input)
-
-        if (
-            math.isinf(self.memory_limit)
-            and torch.is_tensor(input)
-            and get_sequence_parallel_group() is None
-        ):
-            return self.basic_forward(input, memory_state)
-        return self.slicing_forward(input, memory_state)
-
     def _conv_forward(self, input, weight, bias, *args, **kwargs):
         """
         Override _conv_forward to work around NVIDIA Conv3d memory bug.
         
-        Bug: PyTorch 2.9+ with cuDNN >= 91002 uses 3x memory for Conv3d 
+        Bug: PyTorch 2.9-2.10 with cuDNN >= 91002 uses 3x memory for Conv3d 
         with fp16/bfloat16 weights due to buggy dispatch layer.
         
         Workaround: Call torch.cudnn_convolution directly to bypass buggy layer.
         Status is logged at startup in compatibility.py.
         """
-        # Optimization: Use fast 2D conv for spatial-only operations (no temporal mixing)
-        # Check: kernel_time=1 OR tail-inflated weights AND stride/dilation/padding compatibility
-        can_use_2d_path = self.check_effective_2d()
-
-        if can_use_2d_path:
-            # Handle 4D input directly (B*T folded into batch)
-            if input.ndim == 4:
-                # Input: (BT, C, H, W)
-                input_2d = input
-                is_4d_input = True
-            else:
-                # Input: (B, C, T, H, W) -> (B*T, C, H, W)
-                B, C, T, H, W = input.shape
-                input_2d = input.permute(0, 2, 1, 3, 4).reshape(B * T, C, H, W)
-                is_4d_input = False
-
-            # Prepare 2D weights
-            if self.kernel_size[0] == 1:
-                weight_2d = weight.squeeze(2)
-            else:
-                # Tail inflation: use the last temporal slice
-                weight_2d = weight[:, :, -1, :, :]
-
-            # Conv2D params
-            stride_2d = self.stride[1:]
-            padding_2d = self.padding[1:]
-            dilation_2d = self.dilation[1:]
-
-            # Execute standard Conv2d
-            out_2d = F.conv2d(
-                input_2d, weight_2d, bias, stride_2d, padding_2d, dilation_2d, self.groups
-            )
-
-            if is_4d_input:
-                return out_2d
-
-            # Reshape output back: (B*T, Out, H', W') -> (B, Out, T, H', W')
-            _, C_out, H_out, W_out = out_2d.shape
-            out = out_2d.view(B, T, C_out, H_out, W_out).permute(0, 2, 1, 3, 4)
-            return out
-
         if (NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND and 
             weight.dtype in (torch.float16, torch.bfloat16) and 
             hasattr(torch.backends.cudnn, 'is_available') and
@@ -307,6 +209,22 @@ class InflatedCausalConv3d(Conv3d):
             operation_name="InflatedCausalConv3d.concat_splits"
         )
         return output
+
+    def forward(
+        self,
+        input: Union[Tensor, List[Tensor]],
+        memory_state: MemoryState = MemoryState.UNSET
+    ) -> Tensor:
+        assert memory_state != MemoryState.UNSET
+        if memory_state != MemoryState.ACTIVE:
+            self.memory = None
+        if (
+            math.isinf(self.memory_limit)
+            and torch.is_tensor(input)
+            and get_sequence_parallel_group() is None
+        ):
+            return self.basic_forward(input, memory_state)
+        return self.slicing_forward(input, memory_state)
 
     def basic_forward(self, input: Tensor, memory_state: MemoryState = MemoryState.UNSET):
         mem_size = self.stride[0] - self.kernel_size[0]

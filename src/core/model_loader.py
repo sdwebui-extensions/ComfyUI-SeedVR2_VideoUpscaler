@@ -378,21 +378,6 @@ class GGUFTensor(torch.Tensor):
                         debug.log(f"Args: {[arg.shape if hasattr(arg, 'shape') else type(arg) for arg in args]}", level="WARNING", category="dit", force=True, indent_level=1)
                     raise
         
-        # Handle conv2d/conv3d operations specially
-        if func in {torch.nn.functional.conv2d, torch.nn.functional.conv3d}:
-            if len(args) >= 2 and isinstance(args[1], cls):  # weight is the second argument
-                try:
-                    weight_tensor = args[1]
-                    dequantized_weight = weight_tensor.dequantize(device=args[0].device, dtype=args[0].dtype)
-                    new_args = (args[0], dequantized_weight) + args[2:]
-                    return func(*new_args, **kwargs)
-                except Exception as e:
-                    if debug:
-                        debug.log(f"Error in conv dequantization: {e}", level="WARNING", category="dit", force=True)
-                        debug.log(f"Function: {func}", level="WARNING", category="dit", force=True, indent_level=1)
-                        debug.log(f"Args: {[arg.shape if hasattr(arg, 'shape') else type(arg) for arg in args]}", level="WARNING", category="dit", force=True, indent_level=1)
-                    raise
-
         # Handle matrix multiplication operations that need dequantization
         if func in {torch.matmul, torch.mm, torch.bmm, torch.addmm, torch.addmv,
                     torch.addr, torch.baddbmm, torch.chain_matmul}:
@@ -408,6 +393,20 @@ class GGUFTensor(torch.Tensor):
                 if debug:
                     debug.log(f"Error in {func.__name__} dequantization: {e}", level="WARNING", category="dit", force=True)
                 raise
+
+        # Handle conv2d/conv3d operations (critical for GGUF VAE models)
+        # Conv3d layers (InflatedCausalConv3d) are not replaced by layer replacement
+        if func in {torch.nn.functional.conv2d, torch.nn.functional.conv3d}:
+            if len(args) >= 2 and isinstance(args[1], cls):  # weight is second arg
+                try:
+                    weight_tensor = args[1]
+                    dequantized_weight = weight_tensor.dequantize(device=args[0].device, dtype=args[0].dtype)
+                    new_args = (args[0], dequantized_weight) + args[2:]
+                    return func(*new_args, **kwargs)
+                except Exception as e:
+                    if debug:
+                        debug.log(f"Error in conv dequantization: {e}", level="WARNING", category="dit", force=True)
+                    raise
         
         # For ALL other operations, delegate to parent WITHOUT dequantization
         # This includes .cpu(), .to(), .device, .dtype, .shape, etc.

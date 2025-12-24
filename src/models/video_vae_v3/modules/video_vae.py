@@ -733,7 +733,7 @@ class VideoAutoencoderKL(nn.Module):
         if slicing_sample_min_size is None:
             slicing_sample_min_size = temporal_downsample_factor
         self.slicing_sample_min_size = slicing_sample_min_size
-        self.slicing_latent_min_size = slicing_sample_min_size // (2**temporal_scale_num)
+        self.slicing_latent_min_size = max(1, slicing_sample_min_size // (2**temporal_scale_num))
 
         # pass init params to Encoder
         self.encoder = Encoder3D(
