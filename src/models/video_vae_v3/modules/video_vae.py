@@ -886,7 +886,7 @@ class VideoAutoencoderKL(nn.Module):
         if split_size is not None:
             self.enable_slicing()
             self.slicing_sample_min_size = split_size
-            self.slicing_latent_min_size = split_size // self.temporal_downsample_factor
+            self.slicing_latent_min_size = max(1, split_size // self.temporal_downsample_factor)
         else:
             self.disable_slicing()
         for module in self.modules():
@@ -950,7 +950,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             self.disable_slicing()
         self.slicing_sample_min_size = split_size
         if split_size is not None:
-            self.slicing_latent_min_size = split_size // self.temporal_downsample_factor
+            self.slicing_latent_min_size = max(1, split_size // self.temporal_downsample_factor)
         for module in self.modules():
             if isinstance(module, InflatedCausalConv3d):
                 module.set_memory_device(memory_device)
