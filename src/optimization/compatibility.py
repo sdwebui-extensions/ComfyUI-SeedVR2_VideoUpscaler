@@ -98,8 +98,8 @@ def ensure_bitsandbytes_safe():
     try:
         import bitsandbytes
         # Success - bitsandbytes works, other nodes can use it
-    except (ImportError, OSError, RuntimeError):
-        # Installation broken or not present - create stub
+    except (ImportError, OSError, RuntimeError, ValueError):
+        # Installation broken, not present, or version detection failed - create stub
         stub = types.ModuleType('bitsandbytes')
         stub.__spec__ = importlib.machinery.ModuleSpec('bitsandbytes', None)
         stub.__file__ = None
